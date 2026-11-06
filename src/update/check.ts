@@ -1,31 +1,20 @@
 import { join } from "node:path";
 import type { UpdateCheckOptions, UpdateCheckResult } from "../contracts/update.js";
-import { GITHUB_REPO, GITHUB_RELEASES_URL } from "../shared/defaults.js";
-import { GaharError, isAbortError, toErrorMessage } from "../shared/errors.js";
+import { GITHUB_REPO } from "../shared/defaults.js";
+import { GaharError } from "../shared/errors.js";
 import { atomicWriteFile, readTextFileIfExists } from "../shared/fsx.js";
 import { VERSION } from "../shared/version.js";
+import { httpGet, isTruthyEnv } from "./http.js";
 import { isNewer, normalizeVersion, valid } from "./semver.js";
 
 /** How long a cached update check stays usable. */
 export const UPDATE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 export const UPDATE_REQUEST_TIMEOUT_MS = 3000;
-export const UPDATE_USER_AGENT = "gahar-code-cli";
-
-export interface GitHubReleaseAsset {
-  name?: unknown;
-  browser_download_url?: unknown;
-  size?: unknown;
-}
 
 export interface GitHubRelease {
   tag_name?: unknown;
-  name?: unknown;
   html_url?: unknown;
-  body?: unknown;
   published_at?: unknown;
-  draft?: unknown;
-  prerelease?: unknown;
-  assets?: unknown;
 }
 
 export interface UpdateSeams {
@@ -33,8 +22,10 @@ export interface UpdateSeams {
   now?: () => number;
   currentVersion?: string;
   env?: NodeJS.ProcessEnv;
-  platform?: string;
+  configDir?: string;
 }
+
+export type CheckForUpdateOptions = UpdateCheckOptions & UpdateSeams;
 
 interface CacheFile {
   version: 1;
@@ -43,28 +34,13 @@ interface CacheFile {
   result: UpdateCheckResult;
 }
 
-const UPDATE_DISABLED_VALUES = new Set(["0", "false", "no", "off"]);
-
 /** True when the user asked to skip update checks via GAHAR_NO_UPDATE_CHECK. */
 export function updateCheckDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  const raw = env.GAHAR_NO_UPDATE_CHECK;
-  if (raw === undefined) return false;
-  return !UPDATE_DISABLED_VALUES.has(raw.trim().toLowerCase());
+  return isTruthyEnv(env.GAHAR_NO_UPDATE_CHECK);
 }
 
-/** Resolves a fetch implementation plus an AbortSignal that works on Node 18+. */
-function resolveTransport(
-  timeoutMs: number,
-  fetchImpl: typeof fetch | undefined,
-): { doFetch: typeof fetch; signal: AbortSignal | undefined } {
-  const doFetch = fetchImpl ?? globalThis.fetch;
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-    return { doFetch, signal: AbortSignal.timeout(timeoutMs) };
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  timer.unref?.();
-  return { doFetch, signal: controller.signal };
+export function latestReleaseApiUrl(repo: string): string {
+  return `https://api.github.com/repos/${repo}/releases/latest`;
 }
 
 /** Converts a raw GitHub payload into the UpdateCheckResult contract shape. */
@@ -79,7 +55,7 @@ export function toUpdateCheckResult(
   const releaseUrl =
     typeof release.html_url === "string" && release.html_url.length > 0
       ? release.html_url
-      : `${GITHUB_RELEASES_URL}/tag/${tag}`;
+      : `https://github.com/${repo}/releases/tag/${tag}`;
   const result: UpdateCheckResult = {
     currentVersion,
     latestVersion,
@@ -118,10 +94,9 @@ async function readCache(
   try {
     const parsed = JSON.parse(text) as Partial<CacheFile>;
     if (parsed.version !== 1 || parsed.repo !== repo) return null;
-    if (typeof parsed.checkedAt !== "number") return null;
-    if (!isCheckResult(parsed.result)) return null;
-    if (now - parsed.checkedAt > UPDATE_CACHE_TTL_MS) return null;
-    if (now - parsed.checkedAt < 0) return null;
+    if (typeof parsed.checkedAt !== "number" || !isCheckResult(parsed.result)) return null;
+    const age = now - parsed.checkedAt;
+    if (age < 0 || age > UPDATE_CACHE_TTL_MS) return null;
     return parsed.result;
   } catch {
     return null;
@@ -138,86 +113,86 @@ async function writeCache(
   await atomicWriteFile(updateCachePath(configDir), `${JSON.stringify(payload, null, 2)}\n`);
 }
 
+function describeHttpFailure(status: number, repo: string): string {
+  if (status === 404) return `no published release was found for ${repo} (HTTP 404)`;
+  if (status === 403 || status === 429) {
+    return `the GitHub API rate limit was reached (HTTP ${status}); try again later`;
+  }
+  return `the GitHub API answered HTTP ${status}`;
+}
+
 async function fetchLatestRelease(
   repo: string,
   timeoutMs: number,
   fetchImpl: typeof fetch | undefined,
   currentVersion: string,
-): Promise<UpdateCheckResult | null> {
-  const { doFetch, signal } = resolveTransport(timeoutMs, fetchImpl);
-  if (typeof doFetch !== "function") return null;
-  const url = `https://api.github.com/repos/${repo}/releases/latest`;
-  const response = await doFetch(url, {
-    method: "GET",
-    // Unauthenticated on purpose: the repository is public and Gahar Code never
-    // stores or transmits a GitHub token.
-    headers: {
-      Accept: "application/vnd.github+json",
-      "User-Agent": UPDATE_USER_AGENT,
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    signal,
-  });
-  if (!response.ok) return null;
-  const payload = (await response.json()) as GitHubRelease;
-  return toUpdateCheckResult(payload, currentVersion, repo);
+): Promise<UpdateCheckResult> {
+  const url = latestReleaseApiUrl(repo);
+  const response = await httpGet(url, "application/vnd.github+json", timeoutMs, fetchImpl);
+  if (!response.ok) {
+    throw new GaharError(
+      `Could not check for updates: ${describeHttpFailure(response.status, repo)}.`,
+      {
+        code: "update_check_failed",
+      },
+    );
+  }
+  const payload = (await response.json().catch(() => null)) as GitHubRelease | null;
+  const result = payload === null ? null : toUpdateCheckResult(payload, currentVersion, repo);
+  if (result === null) {
+    throw new GaharError(`The latest release of ${repo} has no valid version tag.`, {
+      code: "update_check_failed",
+    });
+  }
+  return result;
 }
 
 /**
- * Checks GitHub for a newer release. Never throws: any failure (offline, rate
- * limit, timeout, malformed payload) resolves to null so the CLI cannot crash.
+ * Resolves the latest release, using the 24h cache when allowed. Throws a
+ * GaharError with the reason on failure. Ignores GAHAR_NO_UPDATE_CHECK, so an
+ * explicit "gahar update" still works when background checks are disabled.
+ */
+export async function resolveLatestRelease(
+  options: CheckForUpdateOptions = {},
+): Promise<UpdateCheckResult> {
+  const repo = options.repo ?? GITHUB_REPO;
+  const currentVersion = options.currentVersion ?? VERSION;
+  const now = options.now ?? Date.now;
+  const { configDir } = options;
+  if (options.allowCache !== false && configDir !== undefined) {
+    const cached = await readCache(configDir, repo, now());
+    if (cached !== null) {
+      // The installed version may have changed since the cache was written.
+      const updateAvailable = isNewer(cached.latestVersion, currentVersion);
+      return { ...cached, currentVersion, updateAvailable };
+    }
+  }
+  const timeoutMs = options.timeoutMs ?? UPDATE_REQUEST_TIMEOUT_MS;
+  const result = await fetchLatestRelease(repo, timeoutMs, options.fetchImpl, currentVersion);
+  if (configDir !== undefined) {
+    await writeCache(configDir, repo, now(), result).catch(() => undefined);
+  }
+  return result;
+}
+
+/**
+ * Background check for the startup notice. Never throws: being disabled,
+ * offline, rate limited, timed out or receiving a malformed payload all give null.
  */
 export async function checkForUpdate(
-  options: UpdateCheckOptions & UpdateSeams & { configDir?: string } = {},
+  options: CheckForUpdateOptions = {},
 ): Promise<UpdateCheckResult | null> {
   try {
-    const env = options.env ?? process.env;
-    if (updateCheckDisabled(env)) return null;
-    const repo = options.repo ?? GITHUB_REPO;
-    const timeoutMs = options.timeoutMs ?? UPDATE_REQUEST_TIMEOUT_MS;
-    const currentVersion = options.currentVersion ?? VERSION;
-    const now = options.now ?? Date.now;
-    const configDir = options.configDir;
-    const allowCache = options.allowCache !== false;
-    if (allowCache && configDir !== undefined) {
-      const cached = await readCache(configDir, repo, now());
-      if (cached !== null) return { ...cached, currentVersion };
-    }
-    const fresh = await fetchLatestRelease(repo, timeoutMs, options.fetchImpl, currentVersion);
-    if (fresh === null) return null;
-    const result = fresh;
-    if (configDir !== undefined) {
-      await writeCache(configDir, repo, now(), result).catch(() => undefined);
-    }
-    return result;
+    if (updateCheckDisabled(options.env ?? process.env)) return null;
+    return await resolveLatestRelease(options);
   } catch {
     return null;
   }
 }
 
-/** Same as checkForUpdate, but raises a readable error for "gahar update --check". */
+/** For "gahar update --check": always queries GitHub and reports a failure as an error. */
 export async function checkForUpdateOrThrow(
-  options: UpdateCheckOptions & UpdateSeams & { configDir?: string } = {},
+  options: CheckForUpdateOptions = {},
 ): Promise<UpdateCheckResult> {
-  const env = options.env ?? process.env;
-  if (updateCheckDisabled(env)) {
-    throw new GaharError(
-      "Update checks are disabled by GAHAR_NO_UPDATE_CHECK. Unset it and run: gahar update --check",
-      { code: "update_check_disabled" },
-    );
-  }
-  const result = await checkForUpdate(options);
-  if (result === null) {
-    throw new GaharError(
-      `Could not reach the GitHub releases API for ${options.repo ?? GITHUB_REPO}. ` +
-        "Check your network connection and retry: gahar update --check",
-      { code: "update_check_failed" },
-    );
-  }
-  return result;
-}
-
-export function describeCheckFailure(error: unknown): string {
-  if (isAbortError(error)) return "the request timed out";
-  return toErrorMessage(error);
+  return resolveLatestRelease({ ...options, allowCache: options.allowCache ?? false });
 }
