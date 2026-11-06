@@ -12,12 +12,13 @@ export interface QuestionerOptions {
 export interface Questioner {
   ask(question: string): Promise<string>;
   hidden(question: string): Promise<string>;
-  confirm(question: string, fallback?: boolean): Promise<boolean>;
   close(): void;
   readonly interactive: boolean;
 }
 
-export function createQuestioner(options: QuestionerOptions & { interactive: boolean }): Questioner {
+export function createQuestioner(
+  options: QuestionerOptions & { interactive: boolean },
+): Questioner {
   let index = 0;
   let rl: ReturnType<typeof createInterface> | null = null;
   const answers = options.answers ?? [];
@@ -31,7 +32,10 @@ export function createQuestioner(options: QuestionerOptions & { interactive: boo
     if (options.onPrompt !== undefined) return options.onPrompt();
     if (options.answers !== undefined) return "";
     if (!options.interactive) return "";
-    rl ??= createInterface({ input: process.stdin, output: options.stderr as NodeJS.WritableStream });
+    rl ??= createInterface({
+      input: process.stdin,
+      output: options.stderr as NodeJS.WritableStream,
+    });
     return await rl.question("");
   };
 
@@ -43,13 +47,9 @@ export function createQuestioner(options: QuestionerOptions & { interactive: boo
     },
     async hidden(question: string): Promise<string> {
       options.stderr.write(question);
-      return nextAnswer();
-    },
-    async confirm(question: string, fallback = false): Promise<boolean> {
-      options.stderr.write(question);
-      const answer = (await nextAnswer()).trim().toLowerCase();
-      if (answer === "") return fallback;
-      return answer === "y" || answer === "yes";
+      const scripted = index < answers.length || options.onPrompt !== undefined;
+      if (scripted || !options.interactive || !process.stdin.isTTY) return nextAnswer();
+      return readHiddenLine(options.stderr);
     },
     close(): void {
       if (rl !== null) {
@@ -58,4 +58,32 @@ export function createQuestioner(options: QuestionerOptions & { interactive: boo
       }
     },
   };
+}
+
+/** Reads one line from a TTY in raw mode without echoing it (for API keys). */
+function readHiddenLine(stderr: Writable): Promise<string> {
+  const stdin = process.stdin;
+  return new Promise<string>((resolve) => {
+    let value = "";
+    const finish = (result: string): void => {
+      stdin.off("data", onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stderr.write("\n");
+      resolve(result);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      for (const char of chunk.toString()) {
+        if (char === "\r" || char === "\n" || char === "\u0004" || char === "\u0003") {
+          finish(char === "\u0003" ? "" : value);
+          return;
+        }
+        if (char === "\u007f" || char === "\b") value = value.slice(0, -1);
+        else if (char >= " ") value += char;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
 }

@@ -30,11 +30,9 @@ const PLAIN: Colorizer = {
 
 export interface RendererOptions {
   stderr: Writable;
-  stdout?: Writable;
   color: boolean;
   json: boolean;
   columns?: number;
-  stream?: boolean;
   quiet?: boolean;
 }
 
@@ -47,35 +45,19 @@ export class Renderer {
   private readonly out: Writable;
   private readonly colorizer: Colorizer;
   private readonly json: boolean;
-  private readonly stream: boolean;
   private readonly quiet: boolean;
-  private columns: number;
+  private readonly columns: number;
   private atLineStart = true;
   private spinnerTimer: NodeJS.Timeout | null = null;
   private spinnerFrame = 0;
   private thinking = false;
-  readonly stdout: Writable;
 
   constructor(options: RendererOptions) {
     this.out = options.stderr;
-    this.stdout = options.stdout ?? options.stderr;
     this.colorizer = options.color ? loadColors() : PLAIN;
     this.json = options.json;
-    this.stream = options.stream ?? true;
     this.quiet = options.quiet ?? false;
     this.columns = Math.max(20, options.columns ?? 80);
-  }
-
-  setColumns(columns: number): void {
-    this.columns = Math.max(20, columns);
-  }
-
-  get isJson(): boolean {
-    return this.json;
-  }
-
-  color(enabled: boolean): void {
-    void enabled;
   }
 
   /** Writes a full line to stderr. */
@@ -83,14 +65,6 @@ export class Renderer {
     if (!this.atLineStart) this.out.write("\n");
     this.out.write(`${text}\n`);
     this.atLineStart = true;
-  }
-
-  /** Writes a chunk without forcing a newline (streaming text). */
-  chunk(text: string): void {
-    if (text === "") return;
-    this.stopSpinner();
-    this.out.write(text);
-    this.atLineStart = text.endsWith("\n");
   }
 
   /** Streaming assistant text with a subtle left gutter on the first chunk. */
@@ -136,10 +110,15 @@ export class Renderer {
     this.line(`${this.c("magenta", "->")} ${name} ${this.c("dim", formatArgs(args))}`);
   }
 
-  toolResult(name: string, ok: boolean, output: string, options: ToolResultSummaryOptions = {}): void {
+  toolResult(
+    name: string,
+    ok: boolean,
+    output: string,
+    options: ToolResultSummaryOptions = {},
+  ): void {
     this.stopSpinner();
     const firstLines = options.firstLines ?? 3;
-    const lines = output.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+    const lines = outputLines(output);
     const total = options.totalLines ?? lines.length;
     const marker = ok ? this.c("green", "ok") : this.c("red", "fail");
     this.line(`${this.c("dim", "  <-")} ${name} ${marker}`);
@@ -148,7 +127,7 @@ export class Renderer {
       this.line(`${this.c("dim", "  | ")}${truncateLine(raw, this.columns - 4)}`);
     }
     const hidden = total - shown.length;
-    if (hidden > 0) this.line(`${this.c("dim", `  | ... ${hidden} more line${hidden === 1 ? "" : "s"}`)}`);
+    if (hidden > 0) this.line(this.c("dim", `  | ${moreLines(hidden)}`));
   }
 
   /** Renders a unified diff with +/- coloring, collapsing unchanged context. */
@@ -184,7 +163,7 @@ export class Renderer {
   spinnerStart(label = "thinking"): void {
     this.thinking = true;
     if (this.json || this.spinnerTimer !== null) return;
-    const frames = ["|", "/", "-", "\\\\"];
+    const frames = ["|", "/", "-", "\\"];
     this.spinnerTimer = setInterval(() => {
       const frame = frames[this.spinnerFrame % frames.length] ?? "|";
       this.spinnerFrame += 1;
@@ -194,14 +173,13 @@ export class Renderer {
   }
 
   spinnerStop(): void {
-    this.stopSpinner(true);
+    this.stopSpinner();
   }
 
-  private stopSpinner(clear = false): void {
+  private stopSpinner(): void {
     if (this.spinnerTimer !== null) {
       clearInterval(this.spinnerTimer);
       this.spinnerTimer = null;
-      void clear;
       if (!this.atLineStart) this.out.write("\r\u001b[K");
       this.atLineStart = true;
       this.thinking = false;
@@ -217,7 +195,6 @@ export class Renderer {
   }
 
   private c(kind: keyof Colorizer, text: string): string {
-    if (this.stream === false) return text;
     return this.colorizer[kind](text);
   }
 }
@@ -232,10 +209,6 @@ export function loadColors(): Colorizer {
   } catch {
     // picocolors is optional at runtime; plain output is always available.
   }
-  return PLAIN;
-}
-
-export function plainColors(): Colorizer {
   return PLAIN;
 }
 
@@ -265,10 +238,15 @@ export function truncateLine(text: string, width: number): string {
 
 /** Collapses a long tool result into the first N lines plus a remainder marker. */
 export function summarizeToolOutput(output: string, firstLines = 3): string {
-  const lines = output.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+  const lines = outputLines(output);
   if (lines.length <= firstLines) return lines.join("\n");
-  return [
-    ...lines.slice(0, firstLines),
-    `... ${lines.length - firstLines} more line${lines.length - firstLines === 1 ? "" : "s"}`,
-  ].join("\n");
+  return [...lines.slice(0, firstLines), moreLines(lines.length - firstLines)].join("\n");
+}
+
+function outputLines(output: string): string[] {
+  return output.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
+}
+
+function moreLines(hidden: number): string {
+  return `... ${hidden} more line${hidden === 1 ? "" : "s"}`;
 }

@@ -33,9 +33,10 @@ const VALUE_FLAGS = new Map<string, string>([
   ["-m", "model"],
   ["--permission-mode", "permission-mode"],
   ["--max-tokens", "max-tokens"],
-  ["--resume", "resume"],
-  ["-r", "resume"],
 ]);
+
+/** Session ids look like 20261107-123456-abcd1234 (see session/store newSessionId). */
+const SESSION_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{8}$/i;
 
 const BOOL_FLAGS = new Map<string, string>([
   ["--json", "json"],
@@ -79,6 +80,16 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       options.permissionMode = "full-auto";
       continue;
     }
+    if (arg === "-r" || arg === "--resume") {
+      const next = argv[index + 1];
+      if (next !== undefined && SESSION_ID_PATTERN.test(next)) {
+        options.resume = next;
+        index += 1;
+      } else {
+        options.continue = true;
+      }
+      continue;
+    }
     if (arg === "-p" || arg === "--print") {
       const next = argv[index + 1];
       if (next === undefined) return error(`missing value for ${arg}`);
@@ -90,6 +101,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
     const flag = eq > 0 ? arg.slice(0, eq) : arg;
     const inline = eq > 0 ? arg.slice(eq + 1) : undefined;
+    if (flag === "--resume" && inline !== undefined) {
+      if (inline.trim() === "") return error("missing value for --resume");
+      options.resume = inline;
+      continue;
+    }
     const valueKey = VALUE_FLAGS.get(flag);
     if (valueKey !== undefined) {
       const value = inline ?? argv[index + 1];
@@ -110,7 +126,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       else if (boolKey === "quiet") options.quiet = true;
       continue;
     }
-    if (arg.startsWith("-") && arg !== "-") return error(`unknown option: ${flag}`);
+    const inCommand = positionals[0] !== undefined && COMMANDS.has(positionals[0]);
+    if (arg.startsWith("-") && arg !== "-" && !inCommand) return error(`unknown option: ${flag}`);
     positionals.push(arg);
   }
 
@@ -143,10 +160,6 @@ function applyValue(options: CliOptions, key: string, value: string): string | u
       return `invalid value for --max-tokens: ${value} (expected a positive integer)`;
     }
     options.maxTokens = parsed;
-    return undefined;
-  }
-  if (key === "resume") {
-    options.resume = value;
     return undefined;
   }
   return undefined;

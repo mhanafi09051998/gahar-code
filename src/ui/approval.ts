@@ -1,22 +1,21 @@
 import { createInterface } from "node:readline";
-import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../contracts/tools.js";
 import type { Writable } from "../cli/env.js";
+import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../contracts/tools.js";
 
 export interface ApprovalHandlerOptions {
   stderr: Writable;
   /** Interactive prompts are only used when this is true. */
   interactive: boolean;
   json?: boolean;
-  /** Reads one answer line; injectable for tests. */
+  /** Reads one answer line (the REPL passes its line editor); injectable for tests. */
   ask?: (question: string) => Promise<string>;
+  /** Called before anything is printed, e.g. to stop a spinner. */
+  beforePrompt?: () => void;
+  /** Renders request detail (a diff or command); defaults to plain indented lines. */
+  renderDetail?: (detail: string) => void;
   /** Remembered "always" decisions for the rest of the session. */
   sessionAllow?: Set<string>;
   onDecision?: (request: ApprovalRequest, decision: ApprovalDecision) => void;
-}
-
-export interface DenialHint {
-  reason: string;
-  hint: string;
 }
 
 /** Builds the "[y]es / [a]lways / [n]o" question text. */
@@ -35,12 +34,12 @@ export function resourceKey(request: ApprovalRequest): string {
   return `${request.tool}:${request.action}:${request.resource ?? request.title}`;
 }
 
-export function describeRequest(request: ApprovalRequest): string[] {
+export function describeRequest(request: ApprovalRequest, includeDetail = true): string[] {
   const lines: string[] = [];
   lines.push(`${request.title} (${request.action})`);
   if (request.resource) lines.push(`  resource: ${request.resource}`);
   if (request.insideWorkspace === false) lines.push("  outside the workspace");
-  if (request.detail !== undefined && request.detail !== "") {
+  if (includeDetail && request.detail !== undefined && request.detail !== "") {
     for (const line of request.detail.replace(/\r\n/g, "\n").split("\n").slice(0, 60)) {
       lines.push(`  ${line}`);
     }
@@ -60,8 +59,11 @@ export function createApprovalHandler(options: ApprovalHandlerOptions): Approval
           options.onDecision?.(request, "allow-session");
           return "allow-session";
         }
-        for (const line of describeRequest(request)) options.stderr.write(`${line}\n`);
-        const answer = await askQuestion(options, approvalQuestion());
+        options.beforePrompt?.();
+        const custom = options.renderDetail !== undefined;
+        for (const line of describeRequest(request, !custom)) options.stderr.write(`${line}\n`);
+        if (custom && request.detail) options.renderDetail?.(request.detail);
+        const answer = await untilAborted(askQuestion(options, approvalQuestion()), signal);
         if (signal?.aborted) return "deny";
         const decision = parseAnswer(answer);
         if (decision === "allow-session") sessionAllow.add(key);
@@ -74,21 +76,25 @@ export function createApprovalHandler(options: ApprovalHandlerOptions): Approval
   };
 }
 
-/** Non-interactive handler: never prints, never hangs, always denies. */
-export function createDenyAllHandler(
-  onDecision?: (request: ApprovalRequest, decision: ApprovalDecision) => void,
-): ApprovalHandler {
-  return {
-    async request(request: ApprovalRequest): Promise<ApprovalDecision> {
-      onDecision?.(request, "deny");
-      return "deny";
-    },
-  };
+/** Resolves to "" (deny) as soon as the turn is aborted. */
+function untilAborted(answer: Promise<string>, signal?: AbortSignal): Promise<string> {
+  if (signal === undefined) return answer;
+  return new Promise<string>((resolve) => {
+    const onAbort = (): void => resolve("");
+    signal.addEventListener("abort", onAbort, { once: true });
+    answer.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      () => resolve(""),
+    );
+  });
 }
 
 async function askQuestion(options: ApprovalHandlerOptions, question: string): Promise<string> {
   if (options.ask !== undefined) return options.ask(question);
-  const rl = createInterface({ input: process.stdin, output: options.stderr as NodeJS.WritableStream });
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
   try {
     return await new Promise<string>((resolve) => {
       rl.question(question, (answer) => resolve(answer));

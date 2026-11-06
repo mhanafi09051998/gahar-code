@@ -13,8 +13,6 @@ export interface JsonEventWriterOptions {
 export class JsonEventWriter {
   private readonly out: Writable;
   private readonly enabled: boolean;
-  private readonly seen: string[] = [];
-  lastEvent: GaharEvent | null = null;
 
   constructor(options: JsonEventWriterOptions) {
     this.out = options.stdout;
@@ -26,9 +24,7 @@ export class JsonEventWriter {
   }
 
   emit(event: GaharEvent): void {
-    this.lastEvent = event;
     if (!this.enabled) return;
-    this.seen.push(event.type);
     this.out.write(`${serialize(event)}\n`);
   }
 
@@ -41,17 +37,17 @@ export class JsonEventWriter {
       ...(code === undefined ? {} : { code }),
     });
   }
-
-  types(): string[] {
-    return [...this.seen];
-  }
 }
 
 export function serialize(event: GaharEvent): string {
   try {
     return JSON.stringify(event);
   } catch {
-    return JSON.stringify({ type: "error", message: "unserializable event", at: new Date().toISOString() });
+    return JSON.stringify({
+      type: "error",
+      message: "unserializable event",
+      at: new Date().toISOString(),
+    });
   }
 }
 

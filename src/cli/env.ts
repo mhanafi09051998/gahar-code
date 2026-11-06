@@ -1,4 +1,5 @@
 import process from "node:process";
+import { defaultConfigDir } from "../config/paths.js";
 
 /** Minimal write surface used by the CLI so tests can capture output. */
 export interface Writable {
@@ -46,7 +47,7 @@ export function createEnv(partial: PartialCliEnv = {}): CliEnv {
   return {
     argv: partial.argv ?? process.argv.slice(2),
     cwd: partial.cwd ?? process.cwd(),
-    configDir: partial.configDir ?? env.GAHAR_CONFIG_DIR ?? defaultConfigDir(env),
+    configDir: partial.configDir ?? defaultConfigDir(env),
     env,
     stdout: partial.stdout ?? process.stdout,
     stderr: partial.stderr ?? process.stderr,
@@ -56,12 +57,6 @@ export function createEnv(partial: PartialCliEnv = {}): CliEnv {
     columns: partial.columns ?? process.stderr.columns ?? 80,
     now: partial.now ?? (() => Date.now()),
   };
-}
-
-function defaultConfigDir(env: NodeJS.ProcessEnv): string {
-  const home = env.HOME ?? env.USERPROFILE ?? process.cwd();
-  const sep = /[\\/]$/.test(home) ? "" : "/";
-  return `${home}${sep}.gahar`;
 }
 
 export function isJsonMode(env: CliEnv, json: boolean): boolean {
