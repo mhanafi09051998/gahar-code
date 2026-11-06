@@ -139,7 +139,6 @@ export async function performUpdate(
     const message = isNewer(latestVersion, currentVersion)
       ? `Update available: v${currentVersion} -> v${latestVersion}. Run: gahar update`
       : `Gahar Code is already up to date (v${currentVersion}).`;
-    log(message);
     return { updated: false, currentVersion, latestVersion, message };
   }
 
@@ -164,6 +163,5 @@ export async function performUpdate(
       await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
   const message = `Updated Gahar Code v${currentVersion} -> v${latestVersion}.`;
-  log(message);
   return { updated: true, currentVersion, latestVersion, message };
 }

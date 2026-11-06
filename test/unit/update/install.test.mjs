@@ -86,6 +86,8 @@ test("already up to date: no download and no npm run", async () => {
   assert.equal(run.error, undefined);
   assert.equal(run.result.updated, false);
   assert.match(run.result.message, /already up to date/);
+  // The caller prints result.message; logging it too would print it twice.
+  assert.ok(!run.logs.includes(run.result.message));
   assert.equal(run.requests.length, 1);
   assert.equal(run.calls.length, 0);
 });
