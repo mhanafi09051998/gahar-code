@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { cacheDir } from "../config/paths.js";
 import type { KeyInfo, ModelInfo } from "../contracts/messages.js";
 import { atomicWriteFile, readTextFileIfExists } from "../shared/fsx.js";
 
@@ -10,7 +11,7 @@ interface ModelCache {
 }
 
 export function modelsCachePath(configDir: string): string {
-  return join(configDir, "cache", "models.json");
+  return join(cacheDir(configDir), "models.json");
 }
 
 export function filterModels(models: ModelInfo[]): ModelInfo[] {

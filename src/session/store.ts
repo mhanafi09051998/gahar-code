@@ -5,8 +5,11 @@ import type { ChatMessage, ToolCall, Usage } from "../contracts/messages.js";
 import type { SessionMeta, SessionSummary } from "../contracts/session.js";
 import {
   atomicWriteFile,
+  chmodBestEffort,
   ensureDir,
   isErrno,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
   pathExists,
   readTextFileIfExists,
   removePath,
@@ -28,7 +31,9 @@ export type SessionEvent =
   | { type: "usage"; at: string; usage: Usage }
   | { type: "title"; at: string; title: string }
   | { type: "model"; at: string; model: string }
-  | { type: "notice"; at: string; message: string };
+  | { type: "notice"; at: string; message: string }
+  /** Replaces every earlier message with the compacted history. */
+  | { type: "compaction"; at: string; messages: ChatMessage[] };
 
 export interface SessionStoreOptions {
   configDir: string;
@@ -55,8 +60,8 @@ export class SessionStore {
     const now = options.now ?? (() => new Date());
     const id = options.id ?? newSessionId(now());
     const dir = sessionPath(options.configDir, options.cwd, id);
-    await ensureDir(dir);
-    await ensureDir(sessionSnapshotsDir(dir));
+    await ensureDir(sessionSnapshotsDir(dir), PRIVATE_DIR_MODE);
+    await chmodBestEffort(dir, PRIVATE_DIR_MODE);
     const stamp = now().toISOString();
     const meta: SessionMeta = {
       id,
@@ -100,8 +105,16 @@ export class SessionStore {
   }
 
   async append(event: SessionEvent): Promise<void> {
-    await ensureDir(this.dir);
-    await appendFile(this.eventsPath, `${JSON.stringify(event)}\n`, "utf8");
+    await ensureDir(this.dir, PRIVATE_DIR_MODE);
+    await appendFile(this.eventsPath, `${JSON.stringify(event)}\n`, {
+      encoding: "utf8",
+      mode: PRIVATE_FILE_MODE,
+    });
+  }
+
+  /** Persists a compacted history so reloads and resumes do not bring back the full transcript. */
+  async appendCompaction(messages: ChatMessage[]): Promise<void> {
+    await this.append({ type: "compaction", at: this.now().toISOString(), messages });
   }
 
   async appendMessage(message: ChatMessage): Promise<void> {
@@ -139,8 +152,10 @@ export class SessionStore {
   }
 
   private async writeMeta(): Promise<void> {
-    await ensureDir(this.dir);
-    await atomicWriteFile(sessionMetaPath(this.dir), `${JSON.stringify(this.meta, null, 2)}\n`);
+    await ensureDir(this.dir, PRIVATE_DIR_MODE);
+    await atomicWriteFile(sessionMetaPath(this.dir), `${JSON.stringify(this.meta, null, 2)}\n`, {
+      mode: PRIVATE_FILE_MODE,
+    });
   }
 
   async readMessages(): Promise<ChatMessage[]> {
@@ -187,7 +202,9 @@ export async function readSessionEvents(eventsPath: string): Promise<ParsedEvent
     }
     if (!event || typeof event !== "object") continue;
     if (event.type === "message" && event.message) messages.push(event.message);
-    else if (event.type === "usage" && event.usage) mergeUsage(usage, event.usage);
+    else if (event.type === "compaction" && Array.isArray(event.messages)) {
+      messages.splice(0, messages.length, ...event.messages);
+    } else if (event.type === "usage" && event.usage) mergeUsage(usage, event.usage);
     else if (event.type === "meta" && event.meta) meta = event.meta;
   }
   const repaired = repairDanglingToolCalls(messages);

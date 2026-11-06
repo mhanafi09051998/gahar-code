@@ -60,7 +60,8 @@ versions on GitHub.
 
 Choose a mode with `--permission-mode`, `--yolo` (same as `full-auto`), `/permissions` inside a
 session, or `GAHAR_PERMISSION_MODE`. Use `full-auto` only in a disposable or version controlled
-workspace. `/undo` restores the files changed by the previous turn.
+workspace. Writes to `.git/`, `.gahar/` or the global config directory always ask, in every
+mode. `/undo` restores the files changed by the previous turn.
 
 ## Command line
 
@@ -78,7 +79,7 @@ gahar <command> [args]
 | `--max-tokens <n>` | maximum tokens per model response |
 | `--json` | emit JSONL events on stdout, logs on stderr |
 | `-c, --continue` | resume the most recent session in this project |
-| `-r, --resume <id>` | resume a session by id |
+| `-r, --resume [id]` | resume a session by id (`YYYYMMDD-HHMMSS-xxxxxxxx`); without an id it acts like `--continue` and any other word is the prompt |
 | `--no-update-check` | skip the release update check |
 | `--no-color` | disable colored output |
 | `--debug` | verbose diagnostics on stderr |
@@ -86,7 +87,7 @@ gahar <command> [args]
 | `-v, --version` | print the version and exit |
 | `-h, --help` | print help and exit |
 
-Value flags also accept `--flag=value`. Use `--` to pass a prompt that starts with a dash.
+Value flags (including `--print` and `--resume`) also accept `--flag=value`. Use `--` to pass a prompt that starts with a dash.
 
 | Command | Meaning |
 | --- | --- |
@@ -120,7 +121,7 @@ Value flags also accept `--flag=value`. Use `--` to pass a prompt that starts wi
 | Location | Contents |
 | --- | --- |
 | `~/.gahar/config.json` | global settings and the API key saved by `gahar auth login` |
-| `<project>/.gahar/config.json` | per-project settings (never secrets, they are ignored there) |
+| `<project>/.gahar/config.json` | per-project settings (never secrets or `baseUrl`; `permissionMode` may only be `ask`) |
 | `~/.gahar/projects/` | saved sessions per project |
 | `~/.gahar/cache/` | update check cache |
 | `AGENTS.md` or `GAHAR.md` | project instructions loaded into the system prompt |

@@ -44,7 +44,10 @@ export function makeContext(workspace, options = {}) {
     });
   return {
     cwd: workspace,
-    config: { apiKey: options.apiKey ?? null },
+    config: {
+      apiKey: options.apiKey ?? null,
+      configDir: options.configDir ?? join(workspace, "..", "global-config"),
+    },
     signal: options.signal ?? new AbortController().signal,
     permissions,
     paths: new DefaultPathGuard({ cwd: workspace }),

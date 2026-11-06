@@ -1,4 +1,3 @@
-import { chmod } from "node:fs/promises";
 import type {
   ConfigOverrides,
   GaharConfig,
@@ -6,7 +5,14 @@ import type {
   ProjectConfig,
   ResolvedConfig,
 } from "../contracts/config.js";
-import { atomicWriteFile, ensureDir, readTextFileIfExists } from "../shared/fsx.js";
+import {
+  atomicWriteFile,
+  chmodBestEffort,
+  ensureDir,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
+  readTextFileIfExists,
+} from "../shared/fsx.js";
 import {
   defaultConfigDir,
   globalConfigBackupPath,
@@ -31,7 +37,7 @@ export interface LoadOptions {
   resolveReal?: (input: string) => Promise<string>;
 }
 
-const CONFIG_MODE = 0o600;
+const CONFIG_MODE = PRIVATE_FILE_MODE;
 
 /** Reads one config file; a corrupt global file is backed up to backupPath. */
 async function readConfigFile(
@@ -152,6 +158,11 @@ function reportWarnings(
       warnings.push(`Ignored unexpected secret field "${field}" in the global config.`);
     }
   }
+  if (result.permissionModeIgnored !== null) {
+    warnings.push(
+      `Ignored permissionMode "${result.permissionModeIgnored}" in the project config: a repository may only set "ask". Use --permission-mode, GAHAR_PERMISSION_MODE or the global config for looser modes.`,
+    );
+  }
   for (const field of result.unknownFields) {
     if (field === "<root>") continue;
     warnings.push(`Ignored unknown or invalid config field "${field}" in the ${scope} config.`);
@@ -213,9 +224,9 @@ export async function saveGlobalConfig(
   for (const [key, value] of Object.entries(merged)) {
     if (value === undefined) delete merged[key];
   }
-  await ensureDir(dir);
+  await ensureDir(dir, PRIVATE_DIR_MODE);
   await atomicWriteFile(filePath, `${JSON.stringify(merged, null, 2)}\n`, { mode: CONFIG_MODE });
-  await chmodBestEffort(filePath);
+  await chmodBestEffort(filePath, CONFIG_MODE);
   return filePath;
 }
 
@@ -234,16 +245,8 @@ export async function clearGlobalApiKey(
   if (!("apiKey" in current)) return false;
   delete current.apiKey;
   await atomicWriteFile(filePath, `${JSON.stringify(current, null, 2)}\n`, { mode: CONFIG_MODE });
-  await chmodBestEffort(filePath);
+  await chmodBestEffort(filePath, CONFIG_MODE);
   return true;
-}
-
-async function chmodBestEffort(filePath: string): Promise<void> {
-  try {
-    await chmod(filePath, CONFIG_MODE);
-  } catch {
-    // Windows and restricted filesystems may not support POSIX modes.
-  }
 }
 
 /** Reads the raw global config object without resolving precedence. */

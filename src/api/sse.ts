@@ -69,10 +69,14 @@ export function parseEventBlock(block: string): SseEvent | null {
   return event;
 }
 
-/** Streams decoded SSE payload strings (never throws on split/malformed input). */
+/**
+ * Streams decoded SSE payload strings (never throws on split/malformed input).
+ * `onChunk` runs for every received chunk, including keep-alive comments.
+ */
 export async function* readSseStream(
   body: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
+  onChunk?: () => void,
 ): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -90,6 +94,7 @@ export async function* readSseStream(
         finished = true;
         break;
       }
+      onChunk?.();
       const textChunk = decoder.decode(step.value, { stream: true });
       for (const event of parser.push(textChunk)) yield event.data;
     }

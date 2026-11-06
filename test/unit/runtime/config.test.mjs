@@ -111,6 +111,22 @@ test("project secrets and global-only fields are ignored with warnings", async (
   assert.ok(config.warnings.some((w) => w.includes('"baseUrl"')));
 });
 
+test("project config cannot loosen permissionMode but may tighten it", async () => {
+  for (const mode of ["full-auto", "auto-edit"]) {
+    const { configDir, cwd } = await setup({ project: JSON.stringify({ permissionMode: mode }) });
+    const { config } = await loadConfig({ cwd, env: { GAHAR_CONFIG_DIR: configDir } });
+    assert.equal(config.permissionMode, "ask");
+    assert.ok(config.warnings.some((w) => w.includes("permissionMode") && w.includes(mode)));
+  }
+  const { configDir, cwd } = await setup({
+    global: JSON.stringify({ permissionMode: "full-auto" }),
+    project: JSON.stringify({ permissionMode: "ask" }),
+  });
+  const { config } = await loadConfig({ cwd, env: { GAHAR_CONFIG_DIR: configDir } });
+  assert.equal(config.permissionMode, "ask");
+  assert.deepEqual(config.warnings, []);
+});
+
 test("global updateCheck and baseUrl are honored without warnings", async () => {
   const { configDir, cwd } = await setup({
     global: JSON.stringify({ version: 1, updateCheck: false, baseUrl: "http://127.0.0.1:1/v1" }),

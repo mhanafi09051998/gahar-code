@@ -1,3 +1,4 @@
+import { INCOMPLETE_FINISH_REASONS } from "../agent/loop.js";
 import type { GaharEvent } from "../contracts/events.js";
 import type { App, AppOptions, TurnResult } from "../contracts/runner.js";
 import { GaharError, isAbortError, toErrorMessage } from "../shared/errors.js";
@@ -62,7 +63,8 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessOut
     });
     writer.emit(initEvent(app, options));
     const result = await app.runTurn(options.prompt, controller.signal);
-    writer.emit(resultEvent(app.sessionId, result));
+    const incomplete = INCOMPLETE_FINISH_REASONS.has(result.finishReason ?? "");
+    writer.emit(resultEvent(app.sessionId, result, incomplete));
     if (!options.json) {
       if (streamed === "") options.stdout.write(result.text);
       const printed = streamed === "" ? result.text : streamed;
@@ -73,7 +75,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<HeadlessOut
         elapsedMs: result.durationMs,
       });
     }
-    return { exitCode: 0, text: result.text, result };
+    return { exitCode: incomplete ? 1 : 0, text: result.text, result };
   } catch (error) {
     const exitCode = controller.signal.aborted ? EXIT_INTERRUPT : failureExitCode(error);
     const message = exitCode === EXIT_INTERRUPT ? "interrupted" : toErrorMessage(error);
@@ -101,7 +103,7 @@ function initEvent(app: App, options: HeadlessOptions): GaharEvent {
   };
 }
 
-function resultEvent(sessionId: string, result: TurnResult): GaharEvent {
+function resultEvent(sessionId: string, result: TurnResult, incomplete: boolean): GaharEvent {
   return {
     type: "result",
     at: new Date().toISOString(),
@@ -111,7 +113,7 @@ function resultEvent(sessionId: string, result: TurnResult): GaharEvent {
     usage: result.usage,
     costUsd: typeof result.usage.cost === "number" ? result.usage.cost : 0,
     finishReason: result.finishReason,
-    isError: false,
+    isError: incomplete,
   };
 }
 

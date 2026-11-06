@@ -94,6 +94,7 @@ export async function createApp(opts: AppOptions): Promise<App> {
       return;
     }
     history = result.messages;
+    await store.appendCompaction(history);
     emit(
       createEvent<CompactionEvent>({
         type: "compaction",
@@ -155,7 +156,12 @@ export async function createApp(opts: AppOptions): Promise<App> {
     compact: () => compactHistory(true),
     async undo() {
       const last = await undo.undoLast();
-      if (last === null || last.restored.length === 0) return false;
+      if (last === null) return false;
+      if (last.skipped.length > 0) {
+        const skipped = last.skipped.map((abs) => paths.relative(abs)).join(", ");
+        notice(`Undo skipped paths that now resolve outside the workspace: ${skipped}`, "warn");
+      }
+      if (last.restored.length === 0) return false;
       for (const abs of last.restored) files.forget(abs);
       emit(
         createEvent<UndoEvent>({

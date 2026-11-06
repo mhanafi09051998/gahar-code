@@ -1,11 +1,11 @@
 import { type SpawnSyncOptions, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { GITHUB_REPO, RELEASE_ASSET_NAME } from "../shared/defaults.js";
+import { RELEASE_ASSET_URL } from "../shared/defaults.js";
 import { GaharError } from "../shared/errors.js";
 
 /** Manual fallback printed whenever an automated install cannot finish. */
-export const MANUAL_INSTALL_COMMAND = `npm install -g https://github.com/${GITHUB_REPO}/releases/latest/download/${RELEASE_ASSET_NAME}`;
+export const MANUAL_INSTALL_COMMAND = `npm install -g ${RELEASE_ASSET_URL}`;
 
 /** An update failure whose message always ends with the manual install command. */
 export function updateFailed(message: string, cause?: unknown): GaharError {

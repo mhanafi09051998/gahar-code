@@ -2,7 +2,7 @@ import type { JsonSchema } from "../contracts/messages.js";
 import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
 import { asRecord, invalidArguments, optionalBoolean, requireString, requireText } from "./args.js";
 import type { EditPlan } from "./file_edit.js";
-import { applyFileEdit, countOccurrences } from "./file_edit.js";
+import { applyFileEdit, countOccurrences, toLf } from "./file_edit.js";
 import { booleanProperty, objectSchema, stringProperty } from "./schema.js";
 
 export function planReplace(
@@ -51,8 +51,8 @@ export class EditFileTool implements Tool {
     try {
       const args = asRecord(rawArgs, this.name);
       const path = requireString(args, "path");
-      const oldString = requireString(args, "old_string");
-      const newString = requireText(args, "new_string");
+      const oldString = toLf(requireString(args, "old_string"));
+      const newString = toLf(requireText(args, "new_string"));
       const replaceAll = optionalBoolean(args, "replace_all") ?? false;
       if (oldString === newString) {
         return {

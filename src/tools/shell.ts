@@ -38,16 +38,43 @@ function windowsShell(): string {
 
 const PWSH_PRELUDE =
   "[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; $global:LASTEXITCODE=0\n";
-/** PowerShell -Command reports only 0/1; forward the real native exit code instead. */
-const PWSH_EPILOGUE =
-  "\nif (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }; exit $LASTEXITCODE";
+
+/** PowerShell treats typographic quotes as quote characters too. */
+function psSingleQuoted(text: string): string {
+  return `'${text.replace(/['\u2018-\u201b]/g, "$&$&")}'`;
+}
+
+/**
+ * Exit code with bash semantics: the status of the last statement. If that
+ * statement ends in a native program, use its exit code (Windows PowerShell 5.1
+ * sets $? to false for any stderr output under 2>&1); otherwise use $?, so a
+ * stale $LASTEXITCODE from an earlier native command never leaks through.
+ */
+function pwshEpilogue(command: string): string {
+  return [
+    "",
+    "$__gaharOk = $?; $__gaharCode = $LASTEXITCODE; $__gaharNative = $false",
+    `$__gaharAst = [System.Management.Automation.Language.Parser]::ParseInput(${psSingleQuoted(command)}, [ref]$null, [ref]$null)`,
+    "$__gaharLast = @($__gaharAst.EndBlock.Statements)[-1]",
+    "$__gaharCmd = if ($__gaharLast -is [System.Management.Automation.Language.PipelineAst]) { $__gaharLast.PipelineElements[-1] }",
+    "if ($__gaharCmd -is [System.Management.Automation.Language.CommandAst] -and $__gaharCmd.GetCommandName()) {",
+    "  $__gaharNative = @(Get-Command $__gaharCmd.GetCommandName() -ErrorAction SilentlyContinue)[0].CommandType -eq 'Application'",
+    "}",
+    "if ($__gaharNative) { exit [int]$__gaharCode } elseif ($__gaharOk) { exit 0 } else { exit 1 }",
+  ].join("\n");
+}
 
 /** Choose the shell: pwsh (else Windows PowerShell) on Windows, bash (else sh) on POSIX. */
 export function resolveShell(command: string, platform = process.platform): ShellSpec {
   if (platform === "win32") {
     return {
       file: windowsShell(),
-      args: ["-NoProfile", "-NonInteractive", "-Command", PWSH_PRELUDE + command + PWSH_EPILOGUE],
+      args: [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        PWSH_PRELUDE + command + pwshEpilogue(command),
+      ],
     };
   }
   if (existsSync("/bin/bash")) return { file: "/bin/bash", args: ["-lc", command] };

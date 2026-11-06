@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { copyFile, readdir } from "node:fs/promises";
+import { copyFile, lstat, readdir, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { SnapshotStore } from "../contracts/tools.js";
+import type { PathGuard, SnapshotStore } from "../contracts/tools.js";
+import { createPathGuard } from "../security/paths.js";
 import {
   atomicWriteFile,
+  chmodBestEffort,
   ensureDir,
   isErrno,
+  PRIVATE_DIR_MODE,
+  PRIVATE_FILE_MODE,
   pathExists,
   readTextFileIfExists,
   removePath,
@@ -28,6 +32,12 @@ export interface TurnIndex {
   entries: SnapshotEntry[];
 }
 
+export interface RestoreResult {
+  restored: string[];
+  /** Entries left alone because their location now escapes the workspace. */
+  skipped: string[];
+}
+
 export interface UndoOptions {
   snapshotsDir: string;
   cwd: string;
@@ -41,6 +51,7 @@ export class UndoManager implements SnapshotStore {
   private readonly cwd: string;
   private readonly maxTurns: number;
   private readonly now: () => Date;
+  private readonly guard: PathGuard;
   private currentTurn = 0;
 
   constructor(options: UndoOptions) {
@@ -48,6 +59,7 @@ export class UndoManager implements SnapshotStore {
     this.cwd = options.cwd;
     this.maxTurns = options.maxTurns ?? MAX_UNDO_TURNS;
     this.now = options.now ?? (() => new Date());
+    this.guard = createPathGuard(options.cwd);
   }
 
   get turn(): number {
@@ -81,11 +93,14 @@ export class UndoManager implements SnapshotStore {
     const existed = await pathExists(abs);
     if (existed) {
       const target = join(this.turnDir(turn), stored);
-      await ensureDir(dirname(target));
+      await ensureDir(dirname(target), PRIVATE_DIR_MODE);
       await copyFile(abs, target);
+      await chmodBestEffort(target, PRIVATE_FILE_MODE);
     }
     index.entries.push({ abs, stored, existed });
-    await atomicWriteFile(this.indexPath(turn), `${JSON.stringify(index, null, 2)}\n`);
+    await atomicWriteFile(this.indexPath(turn), `${JSON.stringify(index, null, 2)}\n`, {
+      mode: PRIVATE_FILE_MODE,
+    });
   }
 
   private storedName(abs: string): string {
@@ -124,32 +139,50 @@ export class UndoManager implements SnapshotStore {
       .sort((a, b) => b - a);
   }
 
-  /** Restores every file captured in a turn (deleting files it created); returns their paths. */
-  async restoreTurn(turn: number): Promise<string[]> {
+  /** True when the entry's parent still resolves (through links) inside the workspace. */
+  private async parentInside(abs: string): Promise<boolean> {
+    try {
+      await this.guard.resolveForWrite(dirname(abs));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Restores every file captured in a turn (deleting files it created). A link
+   * that replaced a captured file is removed rather than followed, and entries
+   * whose parent now escapes the workspace are skipped and reported.
+   */
+  async restoreTurn(turn: number): Promise<RestoreResult> {
     const index = await this.readIndex(turn);
-    const restored: string[] = [];
+    const result: RestoreResult = { restored: [], skipped: [] };
     for (const entry of index.entries) {
+      if (!(await this.parentInside(entry.abs))) {
+        result.skipped.push(entry.abs);
+        continue;
+      }
+      await unlinkIfSymlink(entry.abs);
       if (!entry.existed) {
         await removePath(entry.abs);
-        restored.push(entry.abs);
+        result.restored.push(entry.abs);
         continue;
       }
       const storedPath = join(this.turnDir(turn), entry.stored);
       if (!(await pathExists(storedPath))) continue;
       await ensureDir(dirname(entry.abs));
       await copyFile(storedPath, entry.abs);
-      restored.push(entry.abs);
+      result.restored.push(entry.abs);
     }
     await removePath(this.turnDir(turn));
-    return restored;
+    return result;
   }
 
   /** Restores the most recent turn that still has snapshots. */
-  async undoLast(): Promise<{ turn: number; restored: string[] } | null> {
+  async undoLast(): Promise<({ turn: number } & RestoreResult) | null> {
     const turn = (await this.listTurns())[0];
     if (turn === undefined) return null;
-    const restored = await this.restoreTurn(turn);
-    return { turn, restored };
+    return { turn, ...(await this.restoreTurn(turn)) };
   }
 
   /** Keeps only the newest `keep` turns on disk. */
@@ -162,5 +195,13 @@ export class UndoManager implements SnapshotStore {
 
   async hasSnapshots(): Promise<boolean> {
     return (await this.listTurns()).length > 0;
+  }
+}
+
+async function unlinkIfSymlink(abs: string): Promise<void> {
+  try {
+    if ((await lstat(abs)).isSymbolicLink()) await unlink(abs);
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
   }
 }

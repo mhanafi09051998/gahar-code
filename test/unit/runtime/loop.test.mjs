@@ -186,6 +186,43 @@ test("stops at the iteration limit with a notice", async () => {
   assert.equal(result.iterations, 3);
   assert.equal(client.requests.length, 3);
   assert.ok(events.some((e) => e.type === "notice" && /maximum of 3/.test(e.message)));
+  assert.equal(result.finishReason, "max_iterations");
+});
+
+test("a read after an edit in the same batch runs after the edit", async () => {
+  const order = [];
+  const logged = (name) => async () => {
+    order.push(name);
+    return { ok: true, output: name };
+  };
+  const read = makeTool("read", true, logged("read"));
+  const edit = makeTool("edit", false, logged("edit"));
+  const client = fakeClient([callTools(["e1", "edit", "{}"], ["r1", "read", "{}"]), say("ok")]);
+  const { deps: d } = deps(client, [read, edit]);
+  await runTurn(d, "x", new AbortController().signal);
+  assert.deepEqual(order, ["edit", "read"]);
+});
+
+test("abort keeps the real results of calls that already finished", async () => {
+  const controller = new AbortController();
+  const write = makeTool("write", false, async () => ({ ok: true, output: "wrote x" }));
+  const hang = makeTool("hang", false, async () => {
+    controller.abort();
+    const error = new Error("stopped");
+    error.name = "AbortError";
+    throw error;
+  });
+  const client = fakeClient([
+    callTools(["w1", "write", "{}"], ["h1", "hang", "{}"], ["n1", "write", "{}"]),
+  ]);
+  const { deps: d, saved } = deps(client, [write, hang]);
+  await assert.rejects(runTurn(d, "x", controller.signal), (e) => e.name === "AbortError");
+  const results = saved.filter((m) => m.role === "tool").map((m) => [m.tool_call_id, m.content]);
+  assert.deepEqual(results, [
+    ["w1", "wrote x"],
+    ["h1", ABORTED_BY_USER_RESULT],
+    ["n1", ABORTED_BY_USER_RESULT],
+  ]);
 });
 
 test("history is sent after the system prompt and estimated cost uses model pricing", async () => {

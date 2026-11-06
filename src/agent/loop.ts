@@ -23,10 +23,20 @@ import type { TurnResult } from "../contracts/runner.js";
 import type { Tool, ToolContext, ToolRegistry } from "../contracts/tools.js";
 import { MAX_ITERATIONS } from "../shared/defaults.js";
 import { isAbortError } from "../shared/errors.js";
-import { executeToolCalls } from "./tool-exec.js";
+import { executeToolCalls, ToolBatchAbortError } from "./tool-exec.js";
 import { accumulate, emptyTotals, toUsage, type UsageTotals } from "./usage.js";
 
 export const ABORTED_BY_USER_RESULT = "aborted by user: the tool call did not complete";
+
+/** finishReason of a turn that stopped at maxIterations before the model answered. */
+export const MAX_ITERATIONS_FINISH = "max_iterations";
+
+/** Finish reasons that mean the answer is cut off or missing. */
+export const INCOMPLETE_FINISH_REASONS: ReadonlySet<string> = new Set([
+  MAX_ITERATIONS_FINISH,
+  "length",
+  "error",
+]);
 
 export interface LoopSession {
   appendMessage(message: ChatMessage): Promise<void>;
@@ -100,6 +110,12 @@ export async function runTurn(
       await recordUsage(deps, turnTotals, result.usage);
       const assistant = toAssistantMessage(result);
       pendingCalls = assistant.tool_calls ?? [];
+      if (pendingCalls.length === 0 && INCOMPLETE_FINISH_REASONS.has(finishReason ?? "")) {
+        notice(
+          deps,
+          `The model stopped early (finish reason: ${finishReason}); the answer may be incomplete.`,
+        );
+      }
       await record(assistant);
       if (assistant.content) {
         deps.emit(
@@ -117,12 +133,17 @@ export async function runTurn(
       }
       pendingCalls = [];
       if (iterations === maxIterations) {
+        finishReason = MAX_ITERATIONS_FINISH;
         notice(deps, `Reached the maximum of ${maxIterations} tool iterations; stopping.`);
       }
     }
   } catch (error) {
     if (!isAbortError(error) && !signal.aborted) throw error;
-    for (const call of pendingCalls) await record(toolMessage(call, ABORTED_BY_USER_RESULT));
+    const completed = error instanceof ToolBatchAbortError ? error.completed : [];
+    for (const [index, call] of pendingCalls.entries()) {
+      const output = completed[index]?.result.output ?? ABORTED_BY_USER_RESULT;
+      await record(toolMessage(call, output));
+    }
     notice(deps, "Turn aborted by user.");
     throw abortError();
   }

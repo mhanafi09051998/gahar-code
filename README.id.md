@@ -53,13 +53,16 @@ Saat mulai, Gahar Code mengecek API rilis GitHub paling sering sekali per 24 jam
 | `full-auto` | boleh | boleh | boleh | tanya |
 
 Pilih lewat `--permission-mode`, `--yolo` (sama dengan `full-auto`), `/permissions`, atau
-`GAHAR_PERMISSION_MODE`. `/undo` memulihkan berkas yang diubah giliran sebelumnya.
+`GAHAR_PERMISSION_MODE`. Penulisan ke `.git/`, `.gahar/` atau direktori config global selalu
+ditanyakan di semua mode. `/undo` memulihkan berkas yang diubah giliran sebelumnya.
 
 ## Opsi dan perintah
 
 Opsi: `-p, --print <teks>`, `-m, --model <id>`, `--permission-mode <mode>`, `--yolo`,
-`--max-tokens <n>`, `--json`, `-c, --continue`, `-r, --resume <id>`, `--no-update-check`,
-`--no-color`, `--debug`, `-q, --quiet`, `-v, --version`, `-h, --help`.
+`--max-tokens <n>`, `--json`, `-c, --continue`, `-r, --resume [id]`, `--no-update-check`,
+`--no-color`, `--debug`, `-q, --quiet`, `-v, --version`, `-h, --help`. Tanpa id, `-r` sama dengan
+`--continue` dan kata lain dianggap prompt; id yang salah format ditolak. Opsi bernilai juga
+menerima `--opsi=nilai`, termasuk `--print=` dan `--resume=`.
 
 Perintah: `setup`, `auth login|status|logout`, `model list|set <id>|show`,
 `sessions list|show <id>|rm <id>`, `doctor`, `update [--check] [--force]`, `help`.
@@ -73,7 +76,7 @@ Penjelasan lengkap tiap opsi ada di [README.md](README.md#command-line).
 | Lokasi | Isi |
 | --- | --- |
 | `~/.gahar/config.json` | pengaturan global dan API key dari `gahar auth login` |
-| `<proyek>/.gahar/config.json` | pengaturan per proyek (rahasia diabaikan di sini) |
+| `<proyek>/.gahar/config.json` | pengaturan per proyek (rahasia dan `baseUrl` diabaikan; `permissionMode` hanya boleh `ask`) |
 | `~/.gahar/projects/` | sesi tersimpan per proyek |
 | `AGENTS.md` atau `GAHAR.md` | instruksi proyek untuk model |
 

@@ -87,6 +87,21 @@ test("-r/--resume takes an optional session id", () => {
   assert.equal(latest.options.continue, true);
   assert.equal(latest.prompt, "fix it");
   assert.equal(parseArgs(["--resume"]).options.continue, true);
+  for (const argv of [
+    ["-r", "20261107-12345-abcd1234"],
+    ["--resume=abc"],
+    ["-r", "20261107-1200"],
+  ]) {
+    const parsed = parseArgs(argv);
+    assert.equal(parsed.kind, "error", argv.join(" "));
+    assert.match(parsed.message, /invalid session id/);
+  }
+});
+
+test("--print accepts the --print=value form", () => {
+  const parsed = parseArgs(["--print=summarize this repo"]);
+  assert.equal(parsed.kind, "run");
+  assert.equal(parsed.prompt, "summarize this repo");
 });
 
 test("subcommands keep their own arguments and flags", () => {

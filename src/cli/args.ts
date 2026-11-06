@@ -37,6 +37,12 @@ const VALUE_FLAGS = new Map<string, string>([
 
 /** Session ids look like 20261107-123456-abcd1234 (see session/store newSessionId). */
 const SESSION_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{8}$/i;
+/** A token that is clearly an attempted session id (not a prompt), e.g. a typo or a short form. */
+const SESSION_ID_LIKE = /^\d{6,}-[0-9a-f-]*$/i;
+
+function invalidSessionId(value: string): string {
+  return `invalid session id: ${value} (expected YYYYMMDD-HHMMSS-xxxxxxxx; see gahar sessions)`;
+}
 
 const BOOL_FLAGS = new Map<string, string>([
   ["--json", "json"],
@@ -85,6 +91,8 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       if (next !== undefined && SESSION_ID_PATTERN.test(next)) {
         options.resume = next;
         index += 1;
+      } else if (next !== undefined && SESSION_ID_LIKE.test(next)) {
+        return error(invalidSessionId(next));
       } else {
         options.continue = true;
       }
@@ -103,7 +111,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const inline = eq > 0 ? arg.slice(eq + 1) : undefined;
     if (flag === "--resume" && inline !== undefined) {
       if (inline.trim() === "") return error("missing value for --resume");
+      if (!SESSION_ID_PATTERN.test(inline)) return error(invalidSessionId(inline));
       options.resume = inline;
+      continue;
+    }
+    if (flag === "--print" && inline !== undefined) {
+      printPrompt = inline;
+      sawPrint = true;
       continue;
     }
     const valueKey = VALUE_FLAGS.get(flag);

@@ -1,3 +1,4 @@
+import { isAbsolute, relative, sep } from "node:path";
 import type { ApprovalAction, ResolvedPath, ToolContext, ToolResult } from "../contracts/tools.js";
 import { toErrorMessage } from "../shared/errors.js";
 
@@ -8,6 +9,27 @@ export interface AccessRequest {
   resource: string;
   detail?: string;
   insideWorkspace?: boolean;
+  protectedPath?: boolean;
+}
+
+const PROTECTED_DIRS = new Set([".git", ".gahar"]);
+
+function isWithin(root: string, abs: string): boolean {
+  const rel = relative(root, abs);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * True for writes that could turn an edit-only grant into code execution or
+ * key theft: anything under a .git or .gahar directory (hooks, git config,
+ * project config) and anything inside the global config directory.
+ */
+export function isProtectedPath(abs: string, cwd: string, configDir: string): boolean {
+  if (isWithin(configDir, abs)) return true;
+  if (!isWithin(cwd, abs)) return false;
+  return relative(cwd, abs)
+    .split(sep)
+    .some((segment) => PROTECTED_DIRS.has(segment.toLowerCase()));
 }
 
 /** Asks the permission gate; returns a failed result when denied, otherwise null. */
@@ -35,6 +57,7 @@ export function requireWrite(
     title: `${resolved.exists ? "Edit" : "Create"} ${rel}`,
     resource: resolved.abs,
     insideWorkspace: true,
+    protectedPath: isProtectedPath(resolved.abs, ctx.cwd, ctx.config.configDir),
     ...(detail === undefined ? {} : { detail }),
   });
 }

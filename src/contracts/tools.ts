@@ -11,6 +11,8 @@ export interface ApprovalRequest {
   detail?: string;
   resource?: string;
   insideWorkspace?: boolean;
+  /** Config, git metadata or hooks: always needs interactive approval. */
+  protectedPath?: boolean;
 }
 
 export type ApprovalDecision = "allow" | "allow-session" | "deny";

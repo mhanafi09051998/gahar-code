@@ -4,7 +4,10 @@ import { DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS, DEFAULT_MODEL } from "../shared/d
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "full-auto"];
 const SECRET_FIELD = /^(api[-_]?key|.*(?:key|token|secret))$/i;
 
-/** Validated config fields; updateCheck and baseUrl are honored only in the global file. */
+/**
+ * Validated config fields; updateCheck and baseUrl are honored only in the
+ * global file, and a project file may set permissionMode only to "ask".
+ */
 export interface ConfigValues extends ProjectConfig {
   updateCheck?: boolean;
   baseUrl?: string;
@@ -18,6 +21,8 @@ export interface NormalizeResult {
   values: ConfigValues;
   secretsIgnored: string[];
   unknownFields: string[];
+  /** A project file may only tighten to "ask"; a looser mode lands here instead. */
+  permissionModeIgnored: PermissionMode | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -26,7 +31,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** Validates one raw config object; unknown/invalid fields become warnings. */
 export function normalizeConfig(raw: unknown, scope: ConfigScope = "global"): NormalizeResult {
-  const result: NormalizeResult = { values: {}, secretsIgnored: [], unknownFields: [] };
+  const result: NormalizeResult = {
+    values: {},
+    secretsIgnored: [],
+    unknownFields: [],
+    permissionModeIgnored: null,
+  };
   if (!isRecord(raw)) {
     if (raw !== undefined && raw !== null) result.unknownFields.push("<root>");
     return result;
@@ -53,9 +63,9 @@ export function normalizeConfig(raw: unknown, scope: ConfigScope = "global"): No
         } else result.unknownFields.push(key);
         break;
       case "permissionMode":
-        if (typeof value === "string" && isPermissionMode(value)) {
-          result.values.permissionMode = value;
-        } else result.unknownFields.push(key);
+        if (typeof value !== "string" || !isPermissionMode(value)) result.unknownFields.push(key);
+        else if (scope === "project" && value !== "ask") result.permissionModeIgnored = value;
+        else result.values.permissionMode = value;
         break;
       case "baseUrl":
         if (typeof value === "string" && value.trim().length > 0)

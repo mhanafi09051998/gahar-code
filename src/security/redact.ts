@@ -36,8 +36,3 @@ export function redactSecrets(text: string, extraSecrets: readonly string[] = []
   }
   return touched ? output : text;
 }
-
-/** True when the text carries anything that looks like a credential. */
-export function containsSecret(text: string, extraSecrets: readonly string[] = []): boolean {
-  return redactSecrets(text, extraSecrets) !== text;
-}

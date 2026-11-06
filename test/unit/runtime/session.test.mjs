@@ -116,3 +116,24 @@ test("list, latest and remove sessions", async () => {
   assert.equal(await sessionExists(configDir, cwd, second.id), false);
   assert.equal(await latestSessionId(configDir, cwd), first.id);
 });
+
+test("a compaction event replaces earlier messages on reload", async () => {
+  const { configDir, cwd } = await freshDirs();
+  const store = await SessionStore.create({ configDir, cwd, model: "m" });
+  await store.appendMessage({ role: "user", content: "one" });
+  await store.appendMessage({ role: "assistant", content: "two" });
+  const summary = { role: "user", content: "[summary] one/two" };
+  await store.appendCompaction([summary]);
+  await store.appendMessage({ role: "user", content: "three" });
+  assert.deepEqual(await store.readMessages(), [summary, { role: "user", content: "three" }]);
+});
+
+test("session files are private on POSIX", { skip: process.platform === "win32" }, async () => {
+  const { stat } = await import("node:fs/promises");
+  const { configDir, cwd } = await freshDirs();
+  const store = await SessionStore.create({ configDir, cwd, model: "m" });
+  await store.appendMessage({ role: "user", content: "secret" });
+  assert.equal((await stat(store.dir)).mode & 0o777, 0o700);
+  assert.equal((await stat(store.eventsPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(join(store.dir, "meta.json"))).mode & 0o777, 0o600);
+});

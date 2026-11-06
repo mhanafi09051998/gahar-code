@@ -1,7 +1,7 @@
 import type { JsonSchema } from "../contracts/messages.js";
 import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
 import { asRecord, invalidArguments, requireArray, requireString, requireText } from "./args.js";
-import { applyFileEdit, countOccurrences } from "./file_edit.js";
+import { applyFileEdit, countOccurrences, toLf } from "./file_edit.js";
 import { arrayProperty, objectSchema, stringProperty } from "./schema.js";
 
 interface PlannedEdit {
@@ -101,8 +101,8 @@ export class MultiEditTool implements Tool {
       const edits = requireArray(args, "edits").map((entry, index) => {
         const record = asRecord(entry, `edit #${index + 1}`);
         return {
-          oldString: requireString(record, "old_string"),
-          newString: requireText(record, "new_string"),
+          oldString: toLf(requireString(record, "old_string")),
+          newString: toLf(requireText(record, "new_string")),
         };
       });
       return await applyFileEdit(ctx, this.name, path, (before) => {

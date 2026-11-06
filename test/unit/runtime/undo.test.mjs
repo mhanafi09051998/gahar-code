@@ -83,3 +83,46 @@ test("only the newest maxTurns turns are kept", async () => {
   }
   assert.deepEqual(await undo.listTurns(), [5, 4, 3]);
 });
+
+test("undo replaces a link instead of writing through it", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const { cwd, snapshotsDir } = await setup();
+  const target = join(cwd, "src", "config.sh");
+  const outside = join(cwd, "..", "bashrc");
+  await writeFile(target, "repo version");
+  await writeFile(outside, "user rc");
+  const undo = new UndoManager({ snapshotsDir, cwd });
+  await undo.beginTurn();
+  await undo.capture(target);
+  await rm(target);
+  try {
+    await symlink(outside, target, "file");
+  } catch {
+    return; // Symlinks need extra privileges on some Windows setups.
+  }
+  const result = await undo.undoLast();
+  assert.deepEqual(result.skipped, []);
+  assert.equal(await readFile(outside, "utf8"), "user rc");
+  assert.equal(await readFile(target, "utf8"), "repo version");
+});
+
+test("undo skips entries whose parent now escapes the workspace", async () => {
+  const { symlink } = await import("node:fs/promises");
+  const { cwd, snapshotsDir } = await setup();
+  const outsideDir = join(cwd, "..", "elsewhere");
+  await mkdir(outsideDir);
+  await writeFile(join(cwd, "src", "a.txt"), "original");
+  const undo = new UndoManager({ snapshotsDir, cwd });
+  await undo.beginTurn();
+  await undo.capture(join(cwd, "src", "a.txt"));
+  await rm(join(cwd, "src"), { recursive: true });
+  try {
+    await symlink(outsideDir, join(cwd, "src"), "junction");
+  } catch {
+    return;
+  }
+  const result = await undo.undoLast();
+  assert.deepEqual(result.restored, []);
+  assert.equal(result.skipped.length, 1);
+  assert.equal(await exists(join(outsideDir, "a.txt")), false);
+});

@@ -68,6 +68,26 @@ describe("run_command", () => {
     assert.match(outside.output, /outside the workspace/);
   });
 
+  test("PowerShell exit code follows the last statement", {
+    skip: process.platform !== "win32",
+  }, async () => {
+    const cases = [
+      ["cmd /c exit 3; Write-Output done", 0],
+      ["cmd /c exit 3", 3],
+      [`${node("process.stderr.write('warn')")} 2>&1`, 0],
+      ["Get-Item gahar-missing-file", 1],
+    ];
+    process.env.GAHAR_SHELL = "powershell";
+    try {
+      for (const [command, code] of cases) {
+        const result = await runCommandTool.execute({ command }, makeContext(box.workspace));
+        assert.match(result.output, new RegExp(`^exit code: ${code}\\b`), command);
+      }
+    } finally {
+      delete process.env.GAHAR_SHELL;
+    }
+  });
+
   test("shell helpers", () => {
     const shell = resolveShell("echo 1");
     assert.ok(shell.args.at(-1).includes("echo 1"));

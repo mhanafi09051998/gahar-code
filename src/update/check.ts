@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { cacheDir } from "../config/paths.js";
 import type { UpdateCheckOptions, UpdateCheckResult } from "../contracts/update.js";
 import { GITHUB_REPO } from "../shared/defaults.js";
 import { GaharError } from "../shared/errors.js";
@@ -70,7 +71,7 @@ export function toUpdateCheckResult(
 }
 
 export function updateCachePath(configDir: string): string {
-  return join(configDir, "cache", "update.json");
+  return join(cacheDir(configDir), "update.json");
 }
 
 function isCheckResult(value: unknown): value is UpdateCheckResult {

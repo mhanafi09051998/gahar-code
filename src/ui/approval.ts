@@ -31,15 +31,56 @@ export function parseAnswer(answer: string): ApprovalDecision {
   return "deny";
 }
 
+function isUnsafeCodePoint(code: number, multiline: boolean): boolean {
+  if (multiline && (code === 0x09 || code === 0x0a)) return false;
+  return (
+    code < 0x20 ||
+    (code >= 0x7f && code <= 0x9f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
+ * Replaces terminal control characters (C0, C1, ESC, CR, bidi overrides) with
+ * visible \xNN / \uNNNN escapes so model-supplied text cannot rewrite what the
+ * user sees at an approval prompt. Multiline mode keeps tabs and newlines.
+ */
+export function neutralizeControls(text: string, multiline = false): string {
+  let out = "";
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    if (!isUnsafeCodePoint(code, multiline)) out += char;
+    else if (code <= 0xff) out += `\\x${code.toString(16).padStart(2, "0")}`;
+    else out += `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return out;
+}
+
+function rawDetail(request: ApprovalRequest): string {
+  return (request.detail ?? "").replace(/\r\n/g, "\n");
+}
+
+function hasControls(request: ApprovalRequest): boolean {
+  const singleLine = [request.title, request.resource ?? ""];
+  if (singleLine.some((text) => neutralizeControls(text) !== text)) return true;
+  const detail = rawDetail(request);
+  return neutralizeControls(detail, true) !== detail;
+}
+
 export function describeRequest(request: ApprovalRequest, includeDetail = true): string[] {
   const lines: string[] = [];
-  lines.push(`${request.title} (${request.action})`);
-  if (request.resource) lines.push(`  resource: ${request.resource}`);
+  lines.push(`${neutralizeControls(request.title)} (${request.action})`);
+  if (request.resource) lines.push(`  resource: ${neutralizeControls(request.resource)}`);
   if (request.insideWorkspace === false) lines.push("  outside the workspace");
-  if (includeDetail && request.detail !== undefined && request.detail !== "") {
-    for (const line of request.detail.replace(/\r\n/g, "\n").split("\n").slice(0, 60)) {
-      lines.push(`  ${line}`);
-    }
+  if (request.protectedPath === true)
+    lines.push("  protected path (config, git metadata or hooks)");
+  if (hasControls(request)) {
+    lines.push("  warning: contains terminal control characters, shown escaped as \\xNN");
+  }
+  const detail = neutralizeControls(rawDetail(request), true);
+  if (includeDetail && detail !== "") {
+    for (const line of detail.split("\n").slice(0, 60)) lines.push(`  ${line}`);
   }
   return lines;
 }
@@ -59,7 +100,9 @@ export function createApprovalHandler(options: ApprovalHandlerOptions): Approval
         options.beforePrompt?.();
         const custom = options.renderDetail !== undefined;
         for (const line of describeRequest(request, !custom)) options.stderr.write(`${line}\n`);
-        if (custom && request.detail) options.renderDetail?.(request.detail);
+        if (custom && request.detail) {
+          options.renderDetail?.(neutralizeControls(rawDetail(request), true));
+        }
         const answer = await untilAborted(askQuestion(options, approvalQuestion()), signal);
         if (signal?.aborted) return "deny";
         const decision = parseAnswer(answer);

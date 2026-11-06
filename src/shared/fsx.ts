@@ -1,10 +1,24 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export async function ensureDir(dir: string): Promise<void> {
-  await mkdir(dir, { recursive: true });
+/** Owner-only modes for transcripts, snapshots and other private state. */
+export const PRIVATE_DIR_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
+
+/** Creates a directory tree; `mode` applies to directories created by this call. */
+export async function ensureDir(dir: string, mode?: number): Promise<void> {
+  await mkdir(dir, mode === undefined ? { recursive: true } : { recursive: true, mode });
+}
+
+/** Best-effort chmod: Windows and some filesystems do not support POSIX modes. */
+export async function chmodBestEffort(filePath: string, mode: number): Promise<void> {
+  try {
+    await chmod(filePath, mode);
+  } catch {
+    // Mode bits are advisory where unsupported.
+  }
 }
 
 export async function pathExists(filePath: string): Promise<boolean> {
@@ -46,25 +60,6 @@ export async function atomicWriteFile(
 
 export async function sha256(text: string | Buffer): Promise<string> {
   return createHash("sha256").update(text).digest("hex");
-}
-
-export async function fileSize(filePath: string): Promise<number> {
-  const info = await stat(filePath);
-  return info.size;
-}
-
-export async function isProbablyBinary(filePath: string): Promise<boolean> {
-  try {
-    const handle = await readFile(filePath);
-    const sample = handle.subarray(0, 8192);
-    for (const byte of sample) {
-      if (byte === 0) return true;
-    }
-    return false;
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return false;
-    throw error;
-  }
 }
 
 export function isErrno(error: unknown, code: string): boolean {

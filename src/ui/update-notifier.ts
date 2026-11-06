@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { truthy, type Writable } from "../cli/env.js";
+import { cacheDir } from "../config/paths.js";
 import { BINARY_NAME } from "../shared/defaults.js";
 import { atomicWriteFile, ensureDir, readTextFileIfExists } from "../shared/fsx.js";
 
@@ -34,7 +35,7 @@ export interface NotifyResult {
 }
 
 export function notifyStatePath(configDir: string): string {
-  return join(configDir, "cache", "update-notify.json");
+  return join(cacheDir(configDir), "update-notify.json");
 }
 
 export function formatUpdateLine(latestVersion: string): string {
@@ -55,7 +56,7 @@ export async function notifiedRecently(configDir: string, now: number): Promise<
 
 async function rememberNotified(configDir: string, now: number): Promise<void> {
   try {
-    await ensureDir(join(configDir, "cache"));
+    await ensureDir(cacheDir(configDir));
     await atomicWriteFile(notifyStatePath(configDir), `${JSON.stringify({ notifiedAt: now })}\n`);
   } catch {
     // Best effort: worst case the notice repeats.

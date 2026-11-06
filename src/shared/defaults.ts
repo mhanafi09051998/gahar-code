@@ -11,7 +11,6 @@ export const RECOMMENDED_MODELS = [
 export const DEFAULT_MAX_TOKENS = 16000;
 export const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 export const GITHUB_REPO = "mhanafi09051998/gahar-code";
-export const GITHUB_RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 export const RELEASE_ASSET_NAME = "gahar-code.tgz";
 export const RELEASE_ASSET_URL = `https://github.com/${GITHUB_REPO}/releases/latest/download/${RELEASE_ASSET_NAME}`;
 export const HTTP_REFERER = `https://github.com/${GITHUB_REPO}`;

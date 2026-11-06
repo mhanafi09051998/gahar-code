@@ -26,6 +26,17 @@ export interface ToolOutcome {
   durationMs: number;
 }
 
+/** Thrown when a batch is aborted; `completed[i]` holds the outcome of calls[i] if it finished. */
+export class ToolBatchAbortError extends Error {
+  readonly completed: (ToolOutcome | undefined)[];
+
+  constructor(completed: (ToolOutcome | undefined)[]) {
+    super("Request aborted");
+    this.name = "AbortError";
+    this.completed = completed;
+  }
+}
+
 export type ParsedArguments = { ok: true; value: unknown } | { ok: false; error: string };
 
 export function parseArguments(raw: string | undefined): ParsedArguments {
@@ -38,31 +49,55 @@ export function parseArguments(raw: string | undefined): ParsedArguments {
   }
 }
 
-/** Runs read-only tools with bounded concurrency, then mutating/unknown tools in order. */
+/**
+ * Splits calls into ordered groups: consecutive read-only calls share a group,
+ * and every mutating or unknown call is a group of its own (a barrier), so a
+ * read issued after an edit always sees the edit.
+ */
+export function executionGroups(tools: ToolRegistry, calls: ToolCall[]): number[][] {
+  const groups: number[][] = [];
+  let readGroup: number[] | null = null;
+  for (const [index, call] of calls.entries()) {
+    if (tools.get(call.function.name)?.readOnly !== true) {
+      readGroup = null;
+      groups.push([index]);
+    } else if (readGroup === null) {
+      readGroup = [index];
+      groups.push(readGroup);
+    } else {
+      readGroup.push(index);
+    }
+  }
+  return groups;
+}
+
+/**
+ * Runs calls in the model's order, overlapping only consecutive read-only calls.
+ * On abort it throws ToolBatchAbortError carrying the outcomes that finished.
+ */
 export async function executeToolCalls(
   deps: ToolExecDeps,
   calls: ToolCall[],
   signal: AbortSignal,
 ): Promise<ToolOutcome[]> {
-  const outcomes: ToolOutcome[] = new Array(calls.length);
-  const readOnly: number[] = [];
-  const sequential: number[] = [];
-  calls.forEach((call, index) => {
-    if (deps.tools.get(call.function.name)?.readOnly) readOnly.push(index);
-    else sequential.push(index);
-  });
+  const outcomes: (ToolOutcome | undefined)[] = calls.map(() => undefined);
   const runAt = async (index: number): Promise<void> => {
     const call = calls[index];
     if (call) outcomes[index] = await executeOne(deps, call, signal);
   };
-  await runPool(readOnly, READ_ONLY_CONCURRENCY, runAt);
-  for (const index of sequential) {
-    if (signal.aborted) throw abortError();
-    await runAt(index);
+  try {
+    for (const group of executionGroups(deps.tools, calls)) {
+      if (signal.aborted) throw abortError();
+      await runPool(group, READ_ONLY_CONCURRENCY, runAt);
+    }
+  } catch (error) {
+    if (isAbortError(error) || signal.aborted) throw new ToolBatchAbortError(outcomes);
+    throw error;
   }
-  return outcomes;
+  return outcomes as ToolOutcome[];
 }
 
+/** Settles every worker before rethrowing, so finished outcomes are never lost. */
 async function runPool(
   items: number[],
   concurrency: number,
@@ -75,7 +110,8 @@ async function runPool(
       await worker(item);
     }
   });
-  await Promise.all(runners);
+  const failed = (await Promise.allSettled(runners)).find((r) => r.status === "rejected");
+  if (failed !== undefined) throw failed.reason;
 }
 
 type PreparedCall = { tool: Tool; args: unknown } | { tool: null; args: unknown; error: string };

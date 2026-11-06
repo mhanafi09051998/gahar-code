@@ -26,11 +26,17 @@ export function buildDiff(path: string, before: string, after: string): string {
   return truncateMiddle(patch, MAX_DIFF_CHARS, "diff").text;
 }
 
+/** Edits are planned on LF text, matching what read_file shows the model. */
+export function toLf(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
 export type EditPlan = { ok: true; after: string; label: string } | { ok: false; error: string };
 
 /**
  * Shared pipeline for in-place edits: path guard, read-before-write, plan,
  * permission (with the diff as detail), snapshot, write once, report a diff.
+ * A CRLF file is planned as LF and written back with CRLF line endings.
  */
 export async function applyFileEdit(
   ctx: ToolContext,
@@ -44,7 +50,9 @@ export async function applyFileEdit(
   }
   const stale = await checkFresh(ctx, tool, resolved.abs);
   if (stale !== null) return stale;
-  const before = await readFile(resolved.abs, "utf8");
+  const raw = await readFile(resolved.abs, "utf8");
+  const crlf = raw.includes("\r\n");
+  const before = crlf ? toLf(raw) : raw;
   const planned = plan(before);
   if (!planned.ok)
     return { ok: false, output: `${tool}: no changes were written: ${planned.error}` };
@@ -52,9 +60,10 @@ export async function applyFileEdit(
   const diff = buildDiff(rel, before, planned.after);
   const denied = await requireWrite(ctx, tool, resolved, diff);
   if (denied !== null) return denied;
+  const after = crlf ? planned.after.replace(/\n/g, "\r\n") : planned.after;
   await ctx.snapshots.capture(resolved.abs);
-  await writeFile(resolved.abs, planned.after, "utf8");
-  ctx.files.recordRead(resolved.abs, planned.after);
+  await writeFile(resolved.abs, after, "utf8");
+  ctx.files.recordRead(resolved.abs, after);
   return {
     ok: true,
     output: `Edited ${rel} (${planned.label})\n\n${diff}`,

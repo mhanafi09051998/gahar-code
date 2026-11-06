@@ -25,12 +25,12 @@ function isOutside(request: PermissionRequest): boolean {
 }
 
 /**
- * Pure mode matrix. Anything outside the workspace always asks; full-auto
- * allows the rest; auto-edit additionally allows writes inside the workspace;
- * shell and network ask until full-auto.
+ * Pure mode matrix. Anything outside the workspace or on a protected path
+ * always asks; full-auto allows the rest; auto-edit additionally allows writes
+ * inside the workspace; shell and network ask until full-auto.
  */
 export function autoAllowed(mode: PermissionMode, request: PermissionRequest): boolean {
-  if (isOutside(request)) return false;
+  if (isOutside(request) || request.protectedPath === true) return false;
   if (mode === "full-auto") return true;
   return request.action === "write" && mode === "auto-edit";
 }
@@ -39,6 +39,9 @@ function denyReason(request: PermissionRequest): string {
   const prefix = `${request.tool} requires ${request.action} approval, but no interactive prompt is available (non-interactive session).`;
   if (isOutside(request)) {
     return `${prefix} Paths outside the workspace always need interactive approval; run gahar from a directory that contains them.`;
+  }
+  if (request.protectedPath === true) {
+    return `${prefix} Config, git metadata and hook files always need interactive approval.`;
   }
   const flag =
     request.action === "write" ? "--permission-mode auto-edit" : "--permission-mode full-auto";

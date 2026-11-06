@@ -205,3 +205,18 @@ describe("multi_edit", () => {
     assert.equal(ctx.snapshots.captured.length, 1);
   });
 });
+
+describe("CRLF files", () => {
+  test("multi-line edits copied from read_file match and keep CRLF endings", async () => {
+    const ctx = makeContext(box.workspace);
+    const file = join(box.workspace, "crlf.txt");
+    await writeFile(file, "a\r\nb\r\nc\r\n");
+    await readFileTool.execute({ path: "crlf.txt" }, ctx);
+    const edit = { path: "crlf.txt", old_string: "a\nb", new_string: "x\ny\nz" };
+    assert.equal((await editFileTool.execute(edit, ctx)).ok, true);
+    assert.equal(await readFile(file, "utf8"), "x\r\ny\r\nz\r\nc\r\n");
+    const multi = { path: "crlf.txt", edits: [{ old_string: "z\nc", new_string: "w" }] };
+    assert.equal((await multiEditTool.execute(multi, ctx)).ok, true);
+    assert.equal(await readFile(file, "utf8"), "x\r\ny\r\nw\r\n");
+  });
+});
