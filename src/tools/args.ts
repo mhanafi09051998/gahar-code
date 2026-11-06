@@ -21,6 +21,13 @@ export function requireString(args: Record<string, unknown>, key: string): strin
   return value;
 }
 
+/** A string that may legitimately be empty, such as file content or a replacement. */
+export function requireText(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string") throw new ArgError(`"${key}" is required and must be a string`);
+  return value;
+}
+
 export function optionalString(args: Record<string, unknown>, key: string): string | undefined {
   const value = args[key];
   if (value === undefined || value === null) return undefined;
@@ -52,6 +59,16 @@ export function requireArray(args: Record<string, unknown>, key: string): unknow
   return value;
 }
 
+/** Rejects glob patterns that could walk out of their base directory. */
+export function requireContainedPattern(pattern: string, key: string): string {
+  if (/^([\\/]|[a-zA-Z]:)/.test(pattern) || /(^|[\\/])\.\.([\\/]|$)/.test(pattern)) {
+    throw new ArgError(
+      `"${key}" must be relative and must not contain ".." segments; pass a directory via cwd/path instead`,
+    );
+  }
+  return pattern;
+}
+
 export function clampInteger(
   value: number | undefined,
   min: number,
@@ -67,12 +84,4 @@ export function clampInteger(
 export function invalidArguments(tool: string, error: unknown): { ok: false; output: string } {
   const message = error instanceof Error ? error.message : String(error);
   return { ok: false, output: `invalid arguments: ${message} (${tool})` };
-}
-
-export function failure(tool: string, message: string): { ok: false; output: string } {
-  return { ok: false, output: `${tool}: ${message}` };
-}
-
-export function ok(output: string, detail?: string): { ok: true; output: string; detail?: string } {
-  return detail === undefined ? { ok: true, output } : { ok: true, output, detail };
 }

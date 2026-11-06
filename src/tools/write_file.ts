@@ -1,10 +1,11 @@
-import { stat, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { JsonSchema } from "../contracts/messages.js";
 import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
-import { isErrno } from "../shared/fsx.js";
 import { formatBytes } from "../shared/truncate.js";
-import { asRecord, invalidArguments, requireString } from "./args.js";
+import { checkFresh, requireWrite } from "./access.js";
+import { asRecord, invalidArguments, requireString, requireText } from "./args.js";
 import { objectSchema, stringProperty } from "./schema.js";
 
 export class WriteFileTool implements Tool {
@@ -24,33 +25,29 @@ export class WriteFileTool implements Tool {
     try {
       const args = asRecord(rawArgs, this.name);
       const path = requireString(args, "path");
-      const content = args.content;
-      if (typeof content !== "string") {
-        return { ok: false, output: "invalid arguments: \"content\" must be a string (write_file)" };
-      }
+      const content = requireText(args, "content");
       const resolved = await ctx.paths.resolveForWrite(path, ctx.signal);
       if (resolved.exists && resolved.type !== "file") {
         return { ok: false, output: `write_file: ${path} exists and is not a regular file` };
       }
       if (resolved.exists) {
-        try {
-          await ctx.files.assertFresh(resolved.abs);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return { ok: false, output: `write_file: ${message}` };
-        }
-        await ctx.snapshots.capture(resolved.abs);
+        const stale = await checkFresh(ctx, this.name, resolved.abs);
+        if (stale !== null) return stale;
       }
-      await writeFile(resolved.abs, content, "utf8");
-      ctx.files.forget(resolved.abs);
       const bytes = Buffer.byteLength(content, "utf8");
+      const denied = await requireWrite(ctx, this.name, resolved, formatBytes(bytes));
+      if (denied !== null) return denied;
+      // Captured even for new files so undo can delete what this call created.
+      await ctx.snapshots.capture(resolved.abs);
+      await mkdir(dirname(resolved.abs), { recursive: true });
+      await writeFile(resolved.abs, content, "utf8");
+      ctx.files.recordRead(resolved.abs, content);
+      const rel = ctx.paths.relative(resolved.abs);
       const action = resolved.exists ? "update" : "create";
       return {
         ok: true,
-        output: `${action === "create" ? "Created" : "Updated"} ${ctx.paths.relative(
-          resolved.abs,
-        )} (${formatBytes(bytes)})`,
-        summary: `${action} ${ctx.paths.relative(resolved.abs)} ${formatBytes(bytes)}`,
+        output: `${resolved.exists ? "Updated" : "Created"} ${rel} (${formatBytes(bytes)})`,
+        summary: `${action} ${rel} ${formatBytes(bytes)}`,
         detail: action,
       };
     } catch (error) {
@@ -60,14 +57,3 @@ export class WriteFileTool implements Tool {
 }
 
 export const writeFileTool = new WriteFileTool();
-
-/** Re-exported for tests that want the raw existence helper. */
-export async function fileExistsByteSize(path: string): Promise<number | null> {
-  try {
-    const info = await stat(path);
-    return info.size;
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return null;
-    throw error;
-  }
-}

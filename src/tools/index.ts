@@ -1,6 +1,7 @@
 export * from "./args.js";
 export * from "./edit_file.js";
 export * from "./fetch_url.js";
+export * from "./file_edit.js";
 export * from "./glob.js";
 export * from "./grep.js";
 export * from "./list_dir.js";
@@ -9,6 +10,7 @@ export * from "./read_file.js";
 export * from "./registry.js";
 export * from "./run_command.js";
 export * from "./schema.js";
+export * from "./stores.js";
 export * from "./todo_write.js";
 export * from "./web_search.js";
 export * from "./write_file.js";

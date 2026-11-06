@@ -1,11 +1,6 @@
 import type { PermissionMode } from "../contracts/config.js";
-import type {
-  ApprovalAction,
-  ApprovalDecision,
-  ApprovalHandler,
-  PermissionGate,
-  PermissionRequest,
-} from "../contracts/tools.js";
+import type { ApprovalHandler, PermissionGate, PermissionRequest } from "../contracts/tools.js";
+import { toErrorMessage } from "../shared/errors.js";
 
 export interface PermissionGateOptions {
   mode: PermissionMode;
@@ -25,20 +20,42 @@ export function resourceKey(request: PermissionRequest): string {
   return `${request.action}:${request.resource ?? request.title}`;
 }
 
-export function isReadOnlyAction(action: ApprovalAction): boolean {
-  return action !== "write" && action !== "shell" && action !== "outside-workspace";
+function isOutside(request: PermissionRequest): boolean {
+  return request.action === "outside-workspace" || request.insideWorkspace === false;
+}
+
+/**
+ * Pure mode matrix. Anything outside the workspace always asks; full-auto
+ * allows the rest; auto-edit additionally allows writes inside the workspace;
+ * shell and network ask until full-auto.
+ */
+export function autoAllowed(mode: PermissionMode, request: PermissionRequest): boolean {
+  if (isOutside(request)) return false;
+  if (mode === "full-auto") return true;
+  return request.action === "write" && mode === "auto-edit";
+}
+
+function denyReason(request: PermissionRequest): string {
+  const prefix = `${request.tool} requires ${request.action} approval, but no interactive prompt is available (non-interactive session).`;
+  if (isOutside(request)) {
+    return `${prefix} Paths outside the workspace always need interactive approval; run gahar from a directory that contains them.`;
+  }
+  const flag =
+    request.action === "write" ? "--permission-mode auto-edit" : "--permission-mode full-auto";
+  return `${prefix} Re-run with ${flag} or --yolo to allow it.`;
 }
 
 /**
  * The single place that understands permission modes. Read-only tools never
- * ask, writes inside the workspace auto-allow in auto-edit, shell and network
- * always ask until full-auto, and anything outside the workspace always asks.
+ * call it. Approval prompts are serialized so concurrent tools never stack
+ * prompts, and "allow-session" decisions are remembered per resource key.
  */
 export class DefaultPermissionGate implements PermissionGate {
   mode: PermissionMode;
   private readonly sessions = new Set<string>();
   private readonly handler: ApprovalHandler | undefined;
   private readonly interactive: boolean;
+  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: PermissionGateOptions) {
     this.mode = options.mode;
@@ -55,56 +72,44 @@ export class DefaultPermissionGate implements PermissionGate {
     return this.sessions.has(resourceKey(request));
   }
 
-  allowForSession(request: PermissionRequest): void {
-    this.sessions.add(resourceKey(request));
-  }
-
   clearSession(): void {
     this.sessions.clear();
   }
 
-  private autoAllowed(request: PermissionRequest): boolean {
-    if (this.mode === "full-auto") return true;
-    if (isReadOnlyAction(request.action)) return true;
-    const inside = request.insideWorkspace !== false;
-    if (request.action === "write" && inside && this.mode === "auto-edit") return true;
-    return false;
-  }
-
-  private denyReason(request: PermissionRequest): string {
-    const flag =
-      request.action === "write" && request.insideWorkspace !== false
-        ? "--permission-mode auto-edit"
-        : "--permission-mode full-auto";
-    return [
-      `${request.tool} requires ${request.action} approval, but no interactive prompt is available`,
-      `(non-interactive session). Re-run with ${flag} or --yolo to allow it.`,
-    ].join(" ");
-  }
-
   async ensure(request: PermissionRequest, signal?: AbortSignal): Promise<PermissionDecision> {
-    if (this.sessions.has(resourceKey(request)) || this.autoAllowed(request)) {
+    if (this.isAllowedForSession(request) || autoAllowed(this.mode, request)) {
       return { allowed: true };
     }
-    if (signal?.aborted === true) return { allowed: false, reason: "aborted before approval" };
     if (!this.interactive || this.handler === undefined) {
-      return { allowed: false, reason: this.denyReason(request) };
+      return { allowed: false, reason: denyReason(request) };
     }
-    let decision: ApprovalDecision;
+    const handler = this.handler;
+    const next = this.queue.then(() => this.prompt(handler, request, signal));
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async prompt(
+    handler: ApprovalHandler,
+    request: PermissionRequest,
+    signal: AbortSignal | undefined,
+  ): Promise<PermissionDecision> {
+    if (signal?.aborted === true) return { allowed: false, reason: "aborted before approval" };
+    // An earlier queued prompt may already have granted this resource.
+    if (this.isAllowedForSession(request)) return { allowed: true };
     try {
-      decision = await this.handler.request(request, signal);
+      const decision = await handler.request(request, signal);
+      if (decision === "deny") {
+        return {
+          allowed: false,
+          reason: `user denied ${request.action} for ${request.resource ?? request.title}`,
+        };
+      }
+      if (decision === "allow-session") this.sessions.add(resourceKey(request));
+      return { allowed: true };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return { allowed: false, reason: `approval handler failed: ${message}` };
+      return { allowed: false, reason: `approval handler failed: ${toErrorMessage(error)}` };
     }
-    if (decision === "allow-session") this.sessions.add(resourceKey(request));
-    if (decision === "deny") {
-      return {
-        allowed: false,
-        reason: `user denied ${request.action} for ${request.resource ?? request.title}`,
-      };
-    }
-    return { allowed: true };
   }
 }
 

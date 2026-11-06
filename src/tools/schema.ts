@@ -12,10 +12,6 @@ export function objectSchema(
   };
 }
 
-export const STRING = { type: "string" } as const;
-export const BOOLEAN = { type: "boolean" } as const;
-export const NUMBER = { type: "number" } as const;
-
 export function stringProperty(description: string): Record<string, unknown> {
   return { type: "string", description };
 }
@@ -28,6 +24,9 @@ export function booleanProperty(description: string): Record<string, unknown> {
   return { type: "boolean", description };
 }
 
-export function arrayProperty(description: string, items: Record<string, unknown>): Record<string, unknown> {
+export function arrayProperty(
+  description: string,
+  items: Record<string, unknown>,
+): Record<string, unknown> {
   return { type: "array", description, items };
 }

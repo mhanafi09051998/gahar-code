@@ -1,33 +1,12 @@
-import { realpath, stat } from "node:fs/promises";
-import { join, relative, resolve, sep } from "node:path";
+import { lstat, readlink, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import type { PathGuard, ResolvedPath } from "../contracts/tools.js";
 import { isErrno } from "../shared/fsx.js";
 
-const DEVICE_NAMES = new Set([
-  "con",
-  "prn",
-  "aux",
-  "nul",
-  "com1",
-  "com2",
-  "com3",
-  "com4",
-  "com5",
-  "com6",
-  "com7",
-  "com8",
-  "com9",
-  "lpt1",
-  "lpt2",
-  "lpt3",
-  "lpt4",
-  "lpt5",
-  "lpt6",
-  "lpt7",
-  "lpt8",
-  "lpt9",
-]);
+const DEVICE_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const MAX_LINK_HOPS = 64;
+const CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
 
 /** Reason a path was rejected before any filesystem access. */
 export class PathGuardError extends Error {
@@ -40,18 +19,11 @@ export class PathGuardError extends Error {
   }
 }
 
-function isWindowsPath(input: string): boolean {
-  if (process.platform !== "win32") return false;
-  return /^[a-zA-Z]:[\\/]/.test(input) || input.startsWith("\\\\") || input.startsWith("//");
-}
-
-function assertNoDeviceName(input: string): void {
-  const segments = input.split(/[\\/]+/);
-  for (const raw of segments) {
-    const segment = raw.split(":")[0] ?? "";
-    const stem = segment.split(".")[0] ?? "";
-    if (stem.length === 0) continue;
-    if (DEVICE_NAMES.has(stem.toLowerCase())) {
+/** Rejects Windows reserved device names (CON, NUL, COM1, "aux.txt", "nul:stream"). */
+export function assertNoDeviceName(input: string): void {
+  for (const segment of input.split(/[\\/]+/)) {
+    const stem = (segment.split(":")[0] ?? "").split(".")[0] ?? "";
+    if (DEVICE_NAME.test(stem.trimEnd())) {
       throw new PathGuardError(
         `refusing to use Windows reserved device name "${segment}": rename the file and retry`,
         "device_name",
@@ -60,118 +32,128 @@ function assertNoDeviceName(input: string): void {
   }
 }
 
-/** Normalise a path lexically: resolve relative input, collapse "." and "..". */
-export function normalizePath(input: string, cwd: string): string {
-  return isWindowsPath(input) ? resolve(input) : resolve(cwd, input);
-}
-
 function trimTrailingSeparators(value: string): string {
   const trimmed = value.replace(/[\\/]+$/, "");
   return trimmed.length === 0 ? value : trimmed;
 }
 
 /** Containment with a trailing-separator guard: "C:\\foobar" is not inside "C:\\foo". */
-export function isInsidePath(child: string, parent: string): boolean {
-  const childNorm = trimTrailingSeparators(child);
-  const parentNorm = trimTrailingSeparators(parent);
-  if (childNorm.toLowerCase() === parentNorm.toLowerCase()) return true;
-  return childNorm.toLowerCase().startsWith((parentNorm + sep).toLowerCase());
+export function isInsidePath(
+  child: string,
+  parent: string,
+  caseInsensitive = CASE_INSENSITIVE,
+): boolean {
+  const fold = (value: string): string => (caseInsensitive ? value.toLowerCase() : value);
+  const childNorm = fold(trimTrailingSeparators(child));
+  const parentNorm = fold(trimTrailingSeparators(parent));
+  if (childNorm === parentNorm) return true;
+  const prefix = /[\\/]$/.test(parentNorm) ? parentNorm : parentNorm + sep;
+  return childNorm.startsWith(prefix);
 }
 
-function lexicalParent(value: string): string | null {
-  const resolved = resolve(value);
-  const parent = resolve(resolved, "..");
-  return parent === resolved ? null : parent;
+/**
+ * Realpath the nearest existing ancestor so symlinks and Windows junctions
+ * cannot escape the workspace. A dangling link is followed to its target, so a
+ * write through it cannot create a file outside either.
+ */
+export async function realpathNearestAncestor(candidate: string): Promise<string> {
+  let current = resolve(candidate);
+  const missing: string[] = [];
+  for (let hop = 0; hop < MAX_LINK_HOPS; hop += 1) {
+    try {
+      return resolve(await realpath(current), ...missing);
+    } catch (error) {
+      if (!isErrno(error, "ENOENT") && !isErrno(error, "ENOTDIR")) throw error;
+    }
+    const target = await danglingLinkTarget(current);
+    if (target !== null) {
+      current = target;
+      continue;
+    }
+    const parent = dirname(current);
+    if (parent === current) return resolve(current, ...missing);
+    missing.unshift(basename(current));
+    current = parent;
+  }
+  throw new PathGuardError("too many symbolic links while resolving path", "link_loop");
 }
 
-function toRelative(abs: string, cwd: string): string {
-  const rel = relative(cwd, abs);
-  return rel.split(sep).join("/");
+async function danglingLinkTarget(path: string): Promise<string | null> {
+  try {
+    if (!(await lstat(path)).isSymbolicLink()) return null;
+    return resolve(dirname(path), await readlink(path));
+  } catch {
+    return null;
+  }
+}
+
+async function describe(abs: string): Promise<Pick<ResolvedPath, "exists" | "type">> {
+  try {
+    const info = await stat(abs);
+    const type = info.isFile() ? "file" : info.isDirectory() ? "directory" : "other";
+    return { exists: true, type };
+  } catch (error) {
+    if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) {
+      return { exists: false, type: "missing" };
+    }
+    return { exists: false, type: "other" };
+  }
 }
 
 export interface PathGuardOptions {
   cwd: string;
-  workspaceRoot?: string;
-}
-
-/**
- * Walk up from candidate until an existing ancestor is found, then realpath it
- * so symlinks and Windows junctions cannot be used to escape the workspace.
- */
-async function realpathNearestAncestor(candidate: string): Promise<string> {
-  let current = resolve(candidate);
-  for (let hop = 0; hop < 64; hop += 1) {
-    try {
-      return await realpath(current);
-    } catch (error) {
-      if (!isErrno(error, "ENOENT") && !isErrno(error, "ENOTDIR")) return current;
-    }
-    const parent = lexicalParent(current);
-    if (parent === null) return current;
-    current = parent;
-  }
-  return current;
+  workspaceRoot?: string | undefined;
 }
 
 export class DefaultPathGuard implements PathGuard {
   readonly cwd: string;
   readonly workspaceRoot: string;
+  private realRoot: Promise<string> | undefined;
 
   constructor(options: PathGuardOptions) {
     this.cwd = resolve(options.cwd);
     this.workspaceRoot = resolve(options.workspaceRoot ?? options.cwd);
   }
 
-  private reject(input: string): never {
-    throw new PathGuardError("path must be a non-empty string", "invalid_path");
-  }
-
-  private resolveInput(input: string): string {
-    if (typeof input !== "string" || input.trim().length === 0) this.reject(input);
+  private resolveInput(input: unknown): string {
+    if (typeof input !== "string" || input.trim().length === 0) {
+      throw new PathGuardError("path must be a non-empty string", "invalid_path");
+    }
     if (input.includes("\u0000")) {
       throw new PathGuardError("path contains a NUL byte", "nul_byte");
     }
-    const withBase = isWindowsPath(input) ? input : join(this.cwd, input);
-    assertNoDeviceName(withBase);
-    return resolve(withBase);
+    assertNoDeviceName(input);
+    return resolve(this.cwd, input);
+  }
+
+  /** The workspace root itself may sit behind a link (macOS /tmp, Windows 8.3 names). */
+  private realWorkspaceRoot(): Promise<string> {
+    this.realRoot ??= realpathNearestAncestor(this.workspaceRoot);
+    return this.realRoot;
   }
 
   private async build(abs: string, input: string): Promise<ResolvedPath> {
-    // The lexical path is the primary check; realpath of the nearest existing
-    // ancestor catches symlink and junction escapes (including dangling links).
-    const lexical = await this.lexical(abs, input);
-    if (!lexical.inside) return lexical;
-    const real = await realpathNearestAncestor(abs);
-    const inside = isInsidePath(real, this.workspaceRoot);
-    return { ...lexical, inside };
-  }
-
-  private async lexical(abs: string, input: string): Promise<ResolvedPath> {
-    const inside = isInsidePath(abs, this.workspaceRoot);
-    let type: ResolvedPath["type"] = "missing";
-    let exists = false;
-    try {
-      const info = await stat(abs);
-      exists = true;
-      type = info.isFile() ? "file" : info.isDirectory() ? "directory" : "other";
-    } catch (error) {
-      if (!isErrno(error, "ENOENT") && !isErrno(error, "ENOTDIR")) {
-        type = "other";
-      }
+    let inside = isInsidePath(abs, this.workspaceRoot);
+    if (inside) {
+      const [real, root] = await Promise.all([
+        realpathNearestAncestor(abs),
+        this.realWorkspaceRoot(),
+      ]);
+      inside = isInsidePath(real, root);
     }
-    return { abs, input, inside, exists, type };
+    return { abs, input, inside, ...(await describe(abs)) };
   }
 
+  /**
+   * Reads outside the workspace come back flagged (inside: false); the tool
+   * must clear the permission gate before touching them.
+   */
   async resolveForRead(input: string, _signal?: AbortSignal): Promise<ResolvedPath> {
-    const abs = this.resolveInput(input);
-    // Reads outside the workspace are returned unresolved-but-flagged; the
-    // caller must clear the permission gate first, nothing is read silently.
-    return this.build(abs, input);
+    return this.build(this.resolveInput(input), input);
   }
 
   async resolveForWrite(input: string, _signal?: AbortSignal): Promise<ResolvedPath> {
-    const abs = this.resolveInput(input);
-    const resolved = await this.build(abs, input);
+    const resolved = await this.build(this.resolveInput(input), input);
     if (!resolved.inside) {
       throw new PathGuardError(
         `refusing to write outside the workspace: "${input}" escapes ${this.workspaceRoot}`,
@@ -182,7 +164,9 @@ export class DefaultPathGuard implements PathGuard {
   }
 
   relative(abs: string): string {
-    return toRelative(resolve(abs), this.workspaceRoot);
+    const rel = relative(this.workspaceRoot, resolve(abs));
+    if (rel.length === 0) return ".";
+    return isAbsolute(rel) ? resolve(abs) : rel.split(sep).join("/");
   }
 
   isInside(abs: string): boolean {
@@ -190,6 +174,6 @@ export class DefaultPathGuard implements PathGuard {
   }
 }
 
-export function createPathGuard(cwd: string, workspaceRoot?: string): PathGuard {
+export function createPathGuard(cwd: string, workspaceRoot?: string): DefaultPathGuard {
   return new DefaultPathGuard({ cwd, workspaceRoot });
 }
