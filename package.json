@@ -1,0 +1,36 @@
+{
+  "name": "gahar-code",
+  "version": "0.1.0",
+  "description": "Gahar Code: an agentic coding CLI for your terminal, powered by OpenRouter.",
+  "type": "module",
+  "bin": { "gahar": "./dist/cli.js" },
+  "main": "./dist/cli.js",
+  "exports": { ".": "./dist/cli.js" },
+  "files": ["dist", "README.md", "README.id.md", "CHANGELOG.md", "LICENSE"],
+  "engines": { "node": ">=20.0.0" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "check:size": "node scripts/check-file-size.mjs",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "check": "biome check . && npm run typecheck && npm run check:size && npm test",
+    "prepack": "npm run build"
+  },
+  "keywords": ["ai", "agent", "coding-agent", "cli", "terminal", "openrouter", "developer-tools"],
+  "author": "Muhammad Hanafi",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/mhanafi09051998/gahar-code.git" },
+  "bugs": { "url": "https://github.com/mhanafi09051998/gahar-code/issues" },
+  "homepage": "https://github.com/mhanafi09051998/gahar-code#readme",
+  "dependencies": {
+    "diff": "^8.0.0",
+    "fast-glob": "^3.3.3",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.9.0"
+  }
+}
