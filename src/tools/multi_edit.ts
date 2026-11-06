@@ -1,9 +1,7 @@
-import { readFile, writeFile } from "node:fs/promises";
-
 import type { JsonSchema } from "../contracts/messages.js";
 import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
-import { asRecord, invalidArguments, requireArray, requireString } from "./args.js";
-import { buildDiff, countOccurrences } from "./edit_file.js";
+import { asRecord, invalidArguments, requireArray, requireString, requireText } from "./args.js";
+import { applyFileEdit, countOccurrences } from "./file_edit.js";
 import { arrayProperty, objectSchema, stringProperty } from "./schema.js";
 
 interface PlannedEdit {
@@ -54,7 +52,11 @@ export function planEdits(
   for (let i = 1; i < planned.length; i += 1) {
     const previous = planned[i - 1];
     const current = planned[i];
-    if (previous !== undefined && current !== undefined && previous.index + previous.length > current.index) {
+    if (
+      previous !== undefined &&
+      current !== undefined &&
+      previous.index + previous.length > current.index
+    ) {
       return { ok: false, error: "edits overlap; apply them one at a time" };
     }
   }
@@ -96,48 +98,22 @@ export class MultiEditTool implements Tool {
     try {
       const args = asRecord(rawArgs, this.name);
       const path = requireString(args, "path");
-      const rawEdits = requireArray(args, "edits");
-      const edits = rawEdits.map((entry, index) => {
+      const edits = requireArray(args, "edits").map((entry, index) => {
         const record = asRecord(entry, `edit #${index + 1}`);
         return {
           oldString: requireString(record, "old_string"),
-          newString: (() => {
-            const value = record.new_string;
-            if (typeof value !== "string") {
-              throw new Error(`edit #${index + 1} "new_string" must be a string`);
-            }
-            return value;
-          })(),
+          newString: requireText(record, "new_string"),
         };
       });
-      const resolved = await ctx.paths.resolveForWrite(path, ctx.signal);
-      if (!resolved.exists || resolved.type !== "file") {
-        return { ok: false, output: `multi_edit: file not found: ${path}` };
-      }
-      try {
-        await ctx.files.assertFresh(resolved.abs);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return { ok: false, output: `multi_edit: ${message}` };
-      }
-      const before = await readFile(resolved.abs, "utf8");
-      const planned = planEdits(before, edits);
-      if (!planned.ok) {
+      return await applyFileEdit(ctx, this.name, path, (before) => {
+        const planned = planEdits(before, edits);
+        if (!planned.ok) return planned;
         return {
-          ok: false,
-          output: `multi_edit: no changes were written: ${planned.error}`,
+          ok: true,
+          after: applyEdits(before, planned.edits),
+          label: `${planned.edits.length} edits`,
         };
-      }
-      const after = applyEdits(before, planned.edits);
-      await ctx.snapshots.capture(resolved.abs);
-      await writeFile(resolved.abs, after, "utf8");
-      ctx.files.recordRead(resolved.abs, after);
-      const diff = buildDiff(ctx.paths.relative(resolved.abs), before, after);
-      return {
-        ok: true,
-        output: `Edited ${ctx.paths.relative(resolved.abs)} (${planned.edits.length} edits)\n\n${diff}`,
-        summary: `multi_edit ${ctx.paths.relative(resolved.abs)} (${planned.edits.length} edits)`,
-      };
+      });
     } catch (error) {
       return invalidArguments(this.name, error);
     }

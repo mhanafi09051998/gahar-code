@@ -1,6 +1,5 @@
-import type { JsonSchema } from "../contracts/messages.js";
-import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
-
+import type { ToolDefinition } from "../contracts/messages.js";
+import type { Tool, ToolRegistry } from "../contracts/tools.js";
 import { editFileTool } from "./edit_file.js";
 import { fetchUrlTool } from "./fetch_url.js";
 import { globTool } from "./glob.js";
@@ -28,63 +27,36 @@ export const builtinTools: readonly Tool[] = [
   todoWriteTool,
 ];
 
-export function toolByName(tools: readonly Tool[], name: string): Tool | undefined {
-  return tools.find((tool) => tool.name === name);
-}
+export class DefaultToolRegistry implements ToolRegistry {
+  private readonly tools: readonly Tool[];
+  private readonly byName: ReadonlyMap<string, Tool>;
 
-export function findTool(name: string): Tool | undefined {
-  return toolByName(builtinTools, name);
-}
-
-export interface ToolSummary {
-  name: string;
-  description: string;
-  readOnly: boolean;
-}
-
-export function listTools(tools: readonly Tool[] = builtinTools): ToolSummary[] {
-  return tools.map((tool) => ({ name: tool.name, description: tool.description, readOnly: tool.readOnly }));
-}
-
-/** Execute a tool by name, returning a failed result when the name is unknown. */
-export async function executeTool(
-  name: string,
-  args: unknown,
-  ctx: ToolContext,
-  tools: readonly Tool[] = builtinTools,
-): Promise<ToolResult> {
-  const tool = toolByName(tools, name);
-  if (!tool) {
-    const known = tools.map((candidate) => candidate.name).join(", ");
-    return { ok: false, output: `Unknown tool "${name}". Available tools: ${known}` };
-  }
-  if (tool.readOnly !== true) {
-    // Writes require the permission gate; callers must check before executing.
-    const decision = await ctx.permissions.check({ kind: "tool", tool: name, args });
-    if (decision === "deny") {
-      return { ok: false, output: `Permission denied for tool "${name}".` };
+  constructor(tools: readonly Tool[]) {
+    const byName = new Map<string, Tool>();
+    for (const tool of tools) {
+      if (byName.has(tool.name)) throw new Error(`duplicate tool name: ${tool.name}`);
+      byName.set(tool.name, tool);
     }
+    this.tools = [...tools];
+    this.byName = byName;
   }
-  try {
-    return await tool.execute(args, ctx);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, output: `${name} failed: ${message}` };
+
+  list(): Tool[] {
+    return [...this.tools];
+  }
+
+  get(name: string): Tool | undefined {
+    return this.byName.get(name);
+  }
+
+  definitions(): ToolDefinition[] {
+    return this.tools.map((tool) => ({
+      type: "function",
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    }));
   }
 }
 
-export type { JsonSchema };
-
-export {
-  editFileTool,
-  fetchUrlTool,
-  globTool,
-  grepTool,
-  listDirTool,
-  multiEditTool,
-  readFileTool,
-  runCommandTool,
-  todoWriteTool,
-  webSearchTool,
-  writeFileTool,
-};
+export function createDefaultRegistry(tools: readonly Tool[] = builtinTools): DefaultToolRegistry {
+  return new DefaultToolRegistry(tools);
+}

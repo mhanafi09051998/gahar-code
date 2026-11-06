@@ -4,7 +4,14 @@ import { join } from "node:path";
 import type { JsonSchema } from "../contracts/messages.js";
 import type { Tool, ToolContext, ToolResult } from "../contracts/tools.js";
 import { formatBytes } from "../shared/truncate.js";
-import { asRecord, clampInteger, invalidArguments, optionalNumber, optionalString } from "./args.js";
+import { resolveReadable } from "./access.js";
+import {
+  asRecord,
+  clampInteger,
+  invalidArguments,
+  optionalNumber,
+  optionalString,
+} from "./args.js";
 import { numberProperty, objectSchema, stringProperty } from "./schema.js";
 
 const DEFAULT_SKIP = new Set([".git", "node_modules"]);
@@ -49,7 +56,8 @@ async function walk(
 
 export class ListDirTool implements Tool {
   readonly name = "list_dir";
-  readonly description = "List the entries of a directory with type and size. .git and node_modules are skipped.";
+  readonly description =
+    "List the entries of a directory with type and size. .git and node_modules are skipped.";
   readonly readOnly = true;
   readonly parameters: JsonSchema = objectSchema(
     {
@@ -66,10 +74,9 @@ export class ListDirTool implements Tool {
       const args = asRecord(rawArgs, this.name);
       const input = optionalString(args, "path") ?? ".";
       const depth = clampInteger(optionalNumber(args, "depth"), 1, MAX_DEPTH_CAP, 1);
-      const resolved = await ctx.paths.resolveForRead(input, ctx.signal);
-      if (!resolved.inside) {
-        return { ok: false, output: `list_dir: refusing to list outside the workspace: ${input}` };
-      }
+      const access = await resolveReadable(ctx, this.name, input);
+      if (access.denied) return access.denied;
+      const { resolved } = access;
       if (!resolved.exists) {
         return { ok: false, output: `list_dir: directory not found: ${input}` };
       }

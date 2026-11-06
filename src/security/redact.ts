@@ -1,4 +1,5 @@
-const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
+const PRIVATE_KEY_BLOCK =
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g;
 const PRIVATE_KEY_MASK = "-----BEGIN PRIVATE KEY----- [redacted] -----END PRIVATE KEY-----";
 
 const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
