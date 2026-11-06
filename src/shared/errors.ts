@@ -45,13 +45,14 @@ export function describeApiError(status: number, message: string): GaharError {
     );
   }
   if (status === 403) {
-    return new GaharError(`OpenRouter refused the request (403): ${message}`, { code: "forbidden" });
+    return new GaharError(`OpenRouter refused the request (403): ${message}`, {
+      code: "forbidden",
+    });
   }
   if (status === 404) {
-    return new GaharError(
-      `Model or endpoint not found (404): ${message}. Try: gahar model list`,
-      { code: "not_found" },
-    );
+    return new GaharError(`Model or endpoint not found (404): ${message}. Try: gahar model list`, {
+      code: "not_found",
+    });
   }
   if (status === 429) {
     return new GaharError(

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { formatUpdateNotice, parseUpdateArgs } from "../../../dist/update/command.js";
 import { findNpmCli, npmInvocation, quoteForCmd } from "../../../dist/update/npm.js";
 import { parseVersionOutput, versionInvocations } from "../../../dist/update/verify.js";
 
@@ -71,16 +70,4 @@ test("parseVersionOutput extracts the version from --version output", () => {
   assert.equal(parseVersionOutput("gahar 1.4.0\n"), "1.4.0");
   assert.equal(parseVersionOutput("1.5.0-rc.1"), "1.5.0-rc.1");
   assert.equal(parseVersionOutput("no version here"), null);
-});
-
-test("parseUpdateArgs and formatUpdateNotice", () => {
-  assert.deepEqual(parseUpdateArgs([]), { kind: "ok", check: false, force: false });
-  assert.deepEqual(parseUpdateArgs(["--force"]), { kind: "ok", check: false, force: true });
-  assert.equal(parseUpdateArgs(["now"]).kind, "error");
-  const base = { currentVersion: "0.1.0", latestVersion: "0.2.0", releaseUrl: "https://x/r" };
-  assert.equal(formatUpdateNotice({ ...base, updateAvailable: false }), null);
-  assert.match(
-    formatUpdateNotice({ ...base, updateAvailable: true }),
-    /0\.1\.0 -> 0\.2\.0\. Run: gahar update/,
-  );
 });

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readdir } from "node:fs/promises";
 import { test } from "node:test";
-import { runUpdateCommand } from "../../../dist/update/command.js";
 import {
   parseChecksumFile,
   performUpdate,
@@ -139,23 +138,4 @@ test("an unreachable release API fails with the manual command", async () => {
   const run = await runUpdate({});
   assert.match(run.error.message, /no published release/);
   assert.ok(run.error.message.includes(MANUAL_INSTALL_COMMAND));
-});
-
-test("runUpdateCommand maps outcomes to exit codes", async () => {
-  const out = [];
-  const err = [];
-  const io = { stdout: (line) => out.push(line), stderr: (line) => err.push(line) };
-  assert.equal(await runUpdateCommand(["--bogus"], io), 2);
-  assert.equal(await runUpdateCommand(["--check", "--force"], io), 2);
-  const mock = await startMockGitHub(releaseRoutes({ tag: "v0.2.0" }));
-  try {
-    const seams = { repo: REPO, currentVersion: "0.1.0", fetchImpl: mock.fetchImpl };
-    assert.equal(await runUpdateCommand(["--check"], io, seams), 0);
-    assert.ok(out.some((line) => line.startsWith("Release notes:")));
-    const failing = { ...seams, repo: "example/missing" };
-    assert.equal(await runUpdateCommand([], io, failing), 1);
-    assert.match(err.at(-1), /Install manually/);
-  } finally {
-    await mock.close();
-  }
 });

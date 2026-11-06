@@ -195,14 +195,14 @@ describe("redaction", () => {
       ["ghp_ABCDEFGHIJKLMNOP1234", "gh*_***"],
       ["gho_ABCDEFGHIJKLMNOP1234", "gh*_***"],
       ["ghs_ABCDEFGHIJKLMNOP1234", "gh*_***"],
-      ["xoxb-1234567890-abcdef", "xox*-***"],
-      ["AKIAABCDEFGHIJKLMNOP", "AKIA***"],
+      ["xoxb-1234567890-abcdef", "xox*-***"], // secret-scan: allow (fake fixture)
+      ["AKIAABCDEFGHIJKLMNOP", "AKIA***"], // secret-scan: allow (fake fixture)
     ];
     for (const [secret, mask] of samples) {
       const output = redactSecrets(`token=${secret} end`);
       assert.equal(output, `token=${mask} end`, secret);
     }
-    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----";
+    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIabc\n-----END RSA PRIVATE KEY-----"; // secret-scan: allow (fake fixture)
     assert.doesNotMatch(redactSecrets(`x\n${pem}\ny`), /MIIabc/);
   });
 

@@ -109,7 +109,7 @@ test("ask mode with a denying approval handler blocks the write", async () => {
   assert.equal(approval?.decision, "deny");
   const toolResult = events.find((event) => event.type === "tool_result");
   assert.equal(toolResult?.ok, false);
-  assert.match(toolResult?.output ?? "", /Permission denied/);
+  assert.match(toolResult?.output ?? "", /permission denied/i);
   await app.close();
 });
 
@@ -153,7 +153,7 @@ test("a rejected API key fails the turn with an auth error (exit code 3)", async
 test("a missing API key is rejected before any request", async () => {
   const ws = await workspace();
   await assert.rejects(open(ws, { config: { apiKey: null, apiKeySource: "none" } }), {
-    code: "no_api_key",
+    code: "missing_api_key",
     exitCode: 3,
   });
 });

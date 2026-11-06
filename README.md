@@ -12,7 +12,7 @@ prompt before anything risky. Pick any model OpenRouter offers.
 
 ## Install
 
-Requires Node.js 20 or newer.
+Requires Node.js 20.3 or newer.
 
 ```sh
 npm install -g https://github.com/mhanafi09051998/gahar-code/releases/latest/download/gahar-code.tgz

@@ -8,7 +8,7 @@ dengan konfirmasi izin sebelum aksi berisiko. Model apa pun di OpenRouter bisa d
 
 ## Pemasangan
 
-Butuh Node.js 20 atau lebih baru.
+Butuh Node.js 20.3 atau lebih baru.
 
 ```sh
 npm install -g https://github.com/mhanafi09051998/gahar-code/releases/latest/download/gahar-code.tgz

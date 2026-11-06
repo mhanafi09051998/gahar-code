@@ -12,7 +12,7 @@ npm run build
 node dist/cli.js --help
 ```
 
-Requires Node.js 20 or newer. Use `npm link` to try the `gahar` binary globally.
+Requires Node.js 20.3 or newer. Use `npm link` to try the `gahar` binary globally.
 
 ## Checks
 

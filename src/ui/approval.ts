@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { Writable } from "../cli/env.js";
 import type { ApprovalDecision, ApprovalHandler, ApprovalRequest } from "../contracts/tools.js";
+import { resourceKey } from "../security/permissions.js";
 
 export interface ApprovalHandlerOptions {
   stderr: Writable;
@@ -28,10 +29,6 @@ export function parseAnswer(answer: string): ApprovalDecision {
   if (normalized === "y" || normalized === "yes") return "allow";
   if (normalized === "a" || normalized === "always" || normalized === "all") return "allow-session";
   return "deny";
-}
-
-export function resourceKey(request: ApprovalRequest): string {
-  return `${request.tool}:${request.action}:${request.resource ?? request.title}`;
 }
 
 export function describeRequest(request: ApprovalRequest, includeDetail = true): string[] {

@@ -1,34 +1,36 @@
 import {
+  accumulate,
   buildSystemPromptWithInstructions,
   compact,
+  emptyTotals,
   needsCompaction,
   runTurn,
+  toUsage,
 } from "./agent/index.js";
 import { OpenRouterClient } from "./api/index.js";
-import { MemoryFileRegistry } from "./app/files.js";
-import { createRegistry } from "./app/gate.js";
-import { openSession, requireApiKey } from "./app/session.js";
+import { observeGate, redactToolOutput } from "./app/gate.js";
+import { openSession } from "./app/session.js";
+import { requireApiKey, resolveApiKey } from "./auth/index.js";
 import {
   type CompactionEvent,
   createEvent,
   type NoticeEvent,
-  type TodoItem,
   type UndoEvent,
-  type UsageEvent,
 } from "./contracts/events.js";
-import type { ModelInfo, Usage } from "./contracts/messages.js";
+import type { ModelInfo } from "./contracts/messages.js";
 import type { App, AppOptions } from "./contracts/runner.js";
-import type { PathGuard, ToolContext } from "./contracts/tools.js";
+import type { ToolContext } from "./contracts/tools.js";
 import { createPathGuard } from "./security/paths.js";
 import { createPermissionGate } from "./security/permissions.js";
-import { mergeUsage, UndoManager } from "./session/index.js";
+import { UndoManager } from "./session/index.js";
 import { GaharError } from "./shared/errors.js";
-import { builtinTools } from "./tools/registry.js";
+import { builtinTools, createDefaultRegistry } from "./tools/registry.js";
+import { DefaultFileRegistry, MemoryTodoStore } from "./tools/stores.js";
 
 /** Wires client, tools, permissions, session and undo into one runnable app. */
 export async function createApp(opts: AppOptions): Promise<App> {
   const { config, cwd } = opts;
-  const apiKey = requireApiKey(config);
+  const apiKey = requireApiKey(resolveApiKey(config));
   const emit = opts.events;
   const notice = (message: string, level: NoticeEvent["level"] = "info") =>
     emit(createEvent<NoticeEvent>({ type: "notice", level, message }));
@@ -36,24 +38,25 @@ export async function createApp(opts: AppOptions): Promise<App> {
   const opened = await openSession(opts, model, notice);
   const { store } = opened;
   let history = opened.history;
-  const sessionUsage: Usage = { ...opened.usage };
+  const sessionUsage = accumulate(emptyTotals(), opened.usage);
   const client = new OpenRouterClient({
     apiKey,
     baseUrl: config.baseUrl,
     configDir: config.configDir,
   });
-  const paths: PathGuard = createPathGuard(cwd);
-  const gate = createPermissionGate({
-    mode: config.permissionMode,
-    handler: opts.approvals,
-    interactive: true,
-  });
-  const registry = createRegistry(builtinTools, { gate, cwd, secrets: [apiKey], emit });
-  const files = new MemoryFileRegistry();
+  const paths = createPathGuard(cwd);
+  const permissions = observeGate(
+    createPermissionGate({
+      mode: config.permissionMode,
+      handler: opts.approvals,
+      interactive: true,
+    }),
+    emit,
+  );
+  const registry = createDefaultRegistry(redactToolOutput(builtinTools, [apiKey]));
+  const files = new DefaultFileRegistry();
+  const todos = new MemoryTodoStore();
   const undo = new UndoManager({ snapshotsDir: store.snapshotsDir, cwd });
-  const latestTurn = (await undo.listTurns())[0] ?? 0;
-  while (undo.turn < latestTurn) undo.beginTurn();
-  let todos: TodoItem[] = [];
   let pending: Promise<void> = Promise.resolve();
   let modelInfo: Promise<ModelInfo | null> | null = null;
   let busy = false;
@@ -62,11 +65,11 @@ export async function createApp(opts: AppOptions): Promise<App> {
     cwd,
     config,
     signal,
-    permissions: gate,
+    permissions,
     paths,
     files,
-    snapshots: { capture: (absPath) => undo.capture(absPath) },
-    todos: { replace: (items) => (todos = [...items]), list: () => [...todos] },
+    snapshots: undo,
+    todos,
     sessionId: store.id,
     emit,
   });
@@ -107,14 +110,14 @@ export async function createApp(opts: AppOptions): Promise<App> {
     get meta() {
       return store.getMeta();
     },
-    getUsage: () => ({ ...sessionUsage }),
+    getUsage: () => toUsage(sessionUsage),
     async runTurn(input, signal) {
       if (busy) throw new GaharError("A turn is already running", { code: "busy" });
       busy = true;
       try {
         await pending;
         await compactHistory(false, signal);
-        undo.beginTurn();
+        await undo.beginTurn();
         const systemPrompt = await buildSystemPromptWithInstructions({
           cwd,
           configDir: config.configDir,
@@ -132,27 +135,20 @@ export async function createApp(opts: AppOptions): Promise<App> {
             buildToolContext: toolContext,
             systemPrompt,
             model,
+            modelInfo: await currentModelInfo(),
             history,
+            usage: sessionUsage,
           },
           input,
           signal,
         );
         history = outcome.messages.filter((message) => message.role !== "system");
-        mergeUsage(sessionUsage, outcome.usage);
-        emit(
-          createEvent<UsageEvent>({
-            type: "usage",
-            usage: outcome.usage,
-            totalCostUsd: sessionUsage.cost ?? 0,
-          }),
-        );
         const { text, usage, durationMs, finishReason } = outcome;
         return { text, usage, durationMs, finishReason };
       } catch (error) {
         history = await store.readMessages();
         throw error;
       } finally {
-        await undo.prune().catch(() => undefined);
         busy = false;
       }
     },

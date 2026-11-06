@@ -1,4 +1,3 @@
-import type { ResolvedConfig } from "../contracts/config.js";
 import type { ChatMessage, Usage } from "../contracts/messages.js";
 import type { AppOptions } from "../contracts/runner.js";
 import { latestSessionId, readSessionEvents, SessionStore } from "../session/index.js";
@@ -40,15 +39,4 @@ export async function openSession(
   if (parsed.repaired) notice("Recovered an interrupted tool call batch from the previous run.");
   if (store.getMeta().model !== model) await store.setModel(model);
   return { store, history: parsed.messages, usage: parsed.usage };
-}
-
-export function requireApiKey(config: ResolvedConfig): string {
-  if (config.apiKey) return config.apiKey;
-  throw new GaharError(
-    "No OpenRouter API key configured. Run: gahar auth login or set OPENROUTER_API_KEY",
-    {
-      code: "no_api_key",
-      exitCode: 3,
-    },
-  );
 }
