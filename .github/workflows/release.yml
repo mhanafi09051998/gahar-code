@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Verify the tag matches package.json
+        run: |
+          VERSION="v$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package.json version $VERSION" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run check
+      - run: npm run secret-scan
+      - run: npm run build
+      - name: Pack the tarball
+        run: |
+          TARBALL="$(npm pack --silent | tail -n 1)"
+          mv "$TARBALL" gahar-code.tgz
+          sha256sum gahar-code.tgz > gahar-code.tgz.sha256
+          sha256sum -c gahar-code.tgz.sha256
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --title "Gahar Code $TAG" --generate-notes \
+            gahar-code.tgz gahar-code.tgz.sha256

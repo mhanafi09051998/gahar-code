@@ -1,79 +1,38 @@
-import {
-  spawnSync as nodeSpawnSync,
-  type SpawnSyncOptions,
-  type SpawnSyncReturns,
-} from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PerformUpdateOptions, PerformUpdateResult } from "../contracts/update.js";
 import { GITHUB_REPO, RELEASE_ASSET_NAME } from "../shared/defaults.js";
 import { GaharError, toErrorMessage } from "../shared/errors.js";
 import { VERSION } from "../shared/version.js";
-import { checkForUpdate } from "./check.js";
-import { isNewer, normalizeVersion, valid } from "./semver.js";
+import { resolveLatestRelease, type UpdateSeams } from "./check.js";
+import { httpGet } from "./http.js";
+import {
+  currentNpmEnvironment,
+  defaultSpawn,
+  type NpmEnvironment,
+  npmInstallArgs,
+  npmInvocation,
+  runInvocation,
+  type SpawnLike,
+  summarizeStderr,
+  updateFailed,
+} from "./npm.js";
+import { isNewer } from "./semver.js";
+import { verifyInstalledVersion } from "./verify.js";
 
-export { RELEASE_ASSET_NAME };
+export const DOWNLOAD_TIMEOUT_MS = 60_000;
 
-/** Manual fallback printed whenever an automated install cannot finish. */
-export const MANUAL_INSTALL_COMMAND = `npm install -g https://github.com/${GITHUB_REPO}/releases/latest/download/${RELEASE_ASSET_NAME}`;
-
-export interface SpawnOptionsLike {
-  cwd?: string;
-  stdio?: "inherit" | "pipe" | "ignore";
-  shell?: boolean;
-  env?: NodeJS.ProcessEnv;
-  windowsHide?: boolean;
-}
-
-export interface SpawnResultLike {
-  status: number | null;
-  stdout?: string | null;
-  stderr?: string | null;
-  error?: Error;
-  signal?: NodeJS.Signals | null;
-}
-
-export type SpawnLike = (
-  command: string,
-  args: string[],
-  options: SpawnOptionsLike,
-) => SpawnResultLike;
-
-export interface PerformUpdateSeams {
-  fetchImpl?: typeof fetch;
-  spawnImpl?: SpawnLike;
-  now?: () => number;
-  currentVersion?: string;
-  env?: NodeJS.ProcessEnv;
-  platform?: string;
-  npmCommand?: string;
-  binPath?: string;
-  tempRoot?: string;
+export interface PerformUpdateSeams extends Omit<UpdateSeams, "configDir"> {
+  repo?: string;
   configDir?: string;
+  spawnImpl?: SpawnLike;
+  npm?: Partial<NpmEnvironment>;
+  tempRoot?: string;
 }
 
-/** The real spawn seam, backed by spawnSync so the installer stays synchronous. */
-export const defaultSpawn: SpawnLike = (command, args, options) => {
-  const result = nodeSpawnSync(command, args, options as SpawnSyncOptions);
-  return toSpawnResult(result);
-};
-
-function toSpawnResult(result: SpawnSyncReturns<string | Buffer>): SpawnResultLike {
-  const toText = (value: string | Buffer | null | undefined): string =>
-    typeof value === "string" ? value : (value?.toString() ?? "");
-  const out: SpawnResultLike = {
-    status: result.status ?? null,
-    stdout: toText(result.stdout),
-    stderr: toText(result.stderr),
-    signal: result.signal ?? null,
-  };
-  if (result.error !== undefined) out.error = result.error;
-  return out;
-}
-
-/** Resolves the release asset and checksum URLs for a repo and optional tag. */
+/** URL of the release tarball for a tag, or for the latest release. */
 export function releaseAssetUrl(repo: string, tag?: string): string {
   const base = `https://github.com/${repo}/releases`;
   if (tag === undefined || tag === "" || tag === "latest") {
@@ -86,249 +45,125 @@ export function releaseChecksumUrl(repo: string, tag?: string): string {
   return `${releaseAssetUrl(repo, tag)}.sha256`;
 }
 
-/**
- * Strips a leading path plus ".exe" from an already resolved binary and
- * re-joins it, so Windows paths inside shim directories keep working.
- */
-function logLine(options: PerformUpdateOptions, line: string): void {
-  if (typeof options.onLog === "function") options.onLog(line);
-}
-
-/**
- * Picks the npm executable that should run the global install.
- * Uses the npm CLI that launched this process when it can find it, otherwise
- * falls back to the "npm" shim; on Windows the shim must run through cmd.exe.
- */
-export function resolveNpmCommand(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: string = process.platform,
-): { command: string; shell: boolean } {
-  if (platform === "win32") {
-    return { command: env.ComSpec ?? env.COMSPEC ?? "cmd.exe", shell: false };
-  }
-  return { command: "npm", shell: false };
-}
-
-export function npmInstallArgs(tarballPath: string): string[] {
-  return ["install", "-g", "--force", tarballPath];
-}
-
-/** Parses a sha256 sidecar file; accepts both hex and raw digest output. */
+/** Reads the digest from a sha256sum-style sidecar ("<hex>  gahar-code.tgz"). */
 export function parseChecksumFile(text: string): string | null {
   for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim();
-    if (line === "") continue;
-    const match = /^([a-fA-F0-9]{64})(?:\s|$)/.exec(line);
+    const match = /^([a-fA-F0-9]{64})(?:\s|$)/.exec(rawLine.trim());
     if (match?.[1] !== undefined) return match[1].toLowerCase();
   }
   return null;
 }
 
-export function computeSha256(buffer: Buffer | Uint8Array | string): string {
-  return createHash("sha256").update(buffer).digest("hex");
+export function computeSha256(data: Buffer | Uint8Array | string): string {
+  return createHash("sha256").update(data).digest("hex");
 }
 
-/** Parses "gahar 1.2.3" or "1.2.3" out of a --version output. */
-export function parseVersionOutput(text: string): string | null {
-  const match = /(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)/.exec(text);
-  if (match?.[1] === undefined) return null;
-  const version = normalizeVersion(match[1]);
-  return valid(version) ? version : null;
-}
-function summarize(stderr: string | null | undefined, fallback: string): string {
-  const text = (stderr ?? "").trim();
-  if (text === "") return fallback;
-  return text.split(/\r?\n/).slice(-3).join(" ").slice(0, 400);
-}
-
-async function downloadToFile(
-  url: string,
-  filePath: string,
-  seams: PerformUpdateSeams,
-  timeoutMs: number,
-): Promise<void> {
-  const doFetch = seams.fetchImpl ?? globalThis.fetch;
-  if (typeof doFetch !== "function") {
-    throw new GaharError("No fetch implementation is available in this Node.js runtime.", {
-      code: "update_failed",
-    });
-  }
-  const signal =
-    typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-      ? AbortSignal.timeout(timeoutMs)
-      : undefined;
-  const response = await doFetch(url, {
-    method: "GET",
-    redirect: "follow",
-    headers: { "User-Agent": "gahar-code-cli", Accept: "application/octet-stream" },
-    signal,
-  });
-  if (!response.ok) {
-    throw new GaharError(`Download failed with HTTP ${response.status} for ${url}`, {
-      code: "update_failed",
-    });
-  }
+async function download(url: string, fetchImpl: typeof fetch | undefined): Promise<Buffer> {
+  const response = await httpGet(url, "application/octet-stream", DOWNLOAD_TIMEOUT_MS, fetchImpl);
+  if (!response.ok) throw updateFailed(`Download failed with HTTP ${response.status} for ${url}.`);
   const buffer = Buffer.from(await response.arrayBuffer());
-  if (buffer.byteLength === 0) {
-    throw new GaharError(`Downloaded an empty file from ${url}`, { code: "update_failed" });
-  }
-  await writeFile(filePath, buffer);
+  if (buffer.byteLength === 0) throw updateFailed(`Downloaded an empty file from ${url}.`);
+  return buffer;
 }
 
+/** Downloads the tarball and its checksum, refusing anything that does not match. */
+async function downloadVerifiedTarball(
+  repo: string,
+  tag: string,
+  fetchImpl: typeof fetch | undefined,
+): Promise<Buffer> {
+  const checksumUrl = releaseChecksumUrl(repo, tag);
+  const tarball = await download(releaseAssetUrl(repo, tag), fetchImpl);
+  const expected = parseChecksumFile((await download(checksumUrl, fetchImpl)).toString("utf8"));
+  if (expected === null) {
+    throw updateFailed(
+      `Could not read a valid sha256 checksum from ${checksumUrl}. Refusing to install.`,
+    );
+  }
+  const actual = computeSha256(tarball);
+  if (actual !== expected) {
+    throw updateFailed(
+      `Checksum mismatch for ${RELEASE_ASSET_NAME}: expected ${expected}, got ${actual}. Refusing to install.`,
+    );
+  }
+  return tarball;
+}
 
-/** Runs the global npm install of the downloaded tarball. */
+/** Runs "npm install -g --force <tarball>" with inherited stdio. */
 export function runNpmInstall(
   tarballPath: string,
-  seams: PerformUpdateSeams,
-  options: PerformUpdateOptions,
+  spawn: SpawnLike,
+  npm: NpmEnvironment,
+  log: (line: string) => void,
 ): void {
-  const spawn = seams.spawnImpl ?? defaultSpawn;
-  const { command } = resolveNpmCommand(seams.env ?? process.env, seams.platform);
   const args = npmInstallArgs(tarballPath);
-  logLine(options, `Installing with: npm ${args.join(" ")}`);
-  const result = spawn(command, args, { stdio: "inherit", windowsHide: true });
+  log(`Installing with: npm ${args.join(" ")}`);
+  const result = runInvocation(spawn, npmInvocation(args, npm), "inherit");
   if (result.error !== undefined) {
-    throw new GaharError(
-      `Could not run npm. Install manually: ${MANUAL_INSTALL_COMMAND}`,
-      { code: "update_failed", cause: result.error },
-    );
+    throw updateFailed(`Could not run npm (${result.error.message}).`, result.error);
   }
   if (result.status !== 0) {
-    const detail = summarize(result.stderr, `npm exited with code ${result.status ?? "unknown"}`);
-    throw new GaharError(
-      `npm install failed (${detail}). Install manually: ${MANUAL_INSTALL_COMMAND}`,
-      { code: "update_failed" },
+    const detail = summarizeStderr(
+      result.stderr,
+      `npm exited with code ${result.status ?? "unknown"}`,
     );
+    throw updateFailed(`npm install failed (${detail}).`);
   }
 }
 
-/** Verifies the freshly installed version by asking the binary for --version. */
-export function verifyInstalledVersion(
-  expectedVersion: string,
-  seams: PerformUpdateSeams,
-  options: PerformUpdateOptions,
-): void {
-  const spawn = seams.spawnImpl ?? defaultSpawn;
-  const env = seams.env ?? process.env;
-  const platform = seams.platform ?? process.platform;
-  const binPath = seams.binPath;
-  const localPrefix = env.npm_config_prefix ?? env.PREFIX;
-  const base = binPath ?? (localPrefix !== undefined
-    ? join(localPrefix, platform === "win32" ? "gahar.cmd" : "bin/gahar")
-    : "gahar");
-  const invocations: Array<[string, string[]]> = platform === "win32"
-    ? [[env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `"${base}" --version`]]]
-    : [[base, ["--version"]]];
-  for (const [command, args] of invocations) {
-    logLine(options, `Verifying installed version with: ${command} ${args.join(" ")}`);
-    const result = spawn(command, args, { stdio: "pipe", windowsHide: true });
-    if (result.error !== undefined || result.status !== 0) continue;
-    const parsed = parseVersionOutput(String(result.stdout ?? ""));
-    if (parsed === null) continue;
-    if (parsed === normalizeVersion(expectedVersion)) return;
-    throw new GaharError(
-      `The installed binary reports v${parsed} but v${expectedVersion} was expected. ` +
-        `Reinstall manually: ${MANUAL_INSTALL_COMMAND}`,
-      { code: "update_failed" },
-    );
-  }
-  throw new GaharError(
-    `Installed v${expectedVersion} but could not confirm it with "gahar --version". ` +
-      `Open a new terminal, or verify with: gahar --version. Manual install: ${MANUAL_INSTALL_COMMAND}`,
-    { code: "update_failed" },
-  );
-}
 /**
- * Performs a full update: resolve, download, verify the sha256 checksum, install
- * globally with npm, then confirm the installed version. All failure paths throw
- * a GaharError whose message names the manual install command.
+ * Full update: resolve the latest release, download it, verify the sha256
+ * checksum, install it globally with npm, then confirm the installed version.
+ * Every failure throws a GaharError that names the manual install command.
  */
 export async function performUpdate(
   options: PerformUpdateOptions = {},
-  deps: PerformUpdateSeams = {},
+  seams: PerformUpdateSeams = {},
 ): Promise<PerformUpdateResult> {
-  const env = deps.env ?? process.env;
-  const currentVersion = deps.currentVersion ?? VERSION;
-  const repo = GITHUB_REPO;
-  const checkOptions: Parameters<typeof checkForUpdate>[0] = {
-    repo,
-    env,
-    currentVersion,
-    allowCache: options.checkOnly === true,
-  };
-  if (deps.fetchImpl !== undefined) checkOptions.fetchImpl = deps.fetchImpl;
-  if (deps.now !== undefined) checkOptions.now = deps.now;
-  if (deps.platform !== undefined) checkOptions.platform = deps.platform;
-  if (deps.configDir !== undefined) checkOptions.configDir = deps.configDir;
+  const log = (line: string): void => options.onLog?.(line);
+  const repo = seams.repo ?? GITHUB_REPO;
+  const currentVersion = seams.currentVersion ?? VERSION;
+  log(`Checking ${repo} for a newer release...`);
+  let latestVersion: string;
+  try {
+    const check = await resolveLatestRelease({ ...seams, repo, currentVersion, allowCache: false });
+    latestVersion = check.latestVersion;
+  } catch (error) {
+    throw updateFailed(`${toErrorMessage(error)} Check your network connection and retry.`, error);
+  }
 
-  logLine(options, `Checking ${repo} for a newer release...`);
-  const check = await checkForUpdate(checkOptions);
-  if (check === null) {
-    throw new GaharError(
-      `Could not resolve the latest release of ${repo}. Check your network connection, then retry or install manually: ${MANUAL_INSTALL_COMMAND}`,
-      { code: "update_failed" },
-    );
-  }
-  const latestVersion = check.latestVersion;
-  if (options.checkOnly === true) {
-    const suffix = check.updateAvailable
+  if (
+    options.checkOnly === true ||
+    (options.force !== true && !isNewer(latestVersion, currentVersion))
+  ) {
+    const message = isNewer(latestVersion, currentVersion)
       ? `Update available: v${currentVersion} -> v${latestVersion}. Run: gahar update`
-      : `Gahar Code is up to date (v${currentVersion}).`;
-    logLine(options, suffix);
-    return { updated: false, currentVersion, latestVersion, message: suffix };
-  }
-  if (!options.force && !isNewer(latestVersion, currentVersion)) {
-    const message = `Gahar Code is already up to date (v${currentVersion}).`;
-    logLine(options, message);
+      : `Gahar Code is already up to date (v${currentVersion}).`;
+    log(message);
     return { updated: false, currentVersion, latestVersion, message };
   }
 
-  const assetUrl = `https://github.com/${repo}/releases/download/v${latestVersion}/${RELEASE_ASSET_NAME}`;
-  const checksumUrl = `${assetUrl}.sha256`;
-  logLine(options, `Downloading v${latestVersion} from ${assetUrl}`);
-
-  const tempRoot = deps.tempRoot ?? tmpdir();
+  const npm: NpmEnvironment = { ...currentNpmEnvironment(), ...seams.npm };
+  const spawn = seams.spawnImpl ?? defaultSpawn;
+  const tag = `v${latestVersion}`;
   let workDir: string | null = null;
   try {
-    workDir = await mkdtemp(join(tempRoot, "gahar-update-"));
+    log(`Downloading ${tag} from ${releaseAssetUrl(repo, tag)}`);
+    const tarball = await downloadVerifiedTarball(repo, tag, seams.fetchImpl);
+    log("Checksum verified.");
+    workDir = await mkdtemp(join(seams.tempRoot ?? tmpdir(), "gahar-update-"));
     const tarballPath = join(workDir, RELEASE_ASSET_NAME);
-    const checksumPath = `${tarballPath}.sha256`;
-    const timeoutMs = 60_000;
-    await downloadToFile(assetUrl, tarballPath, deps, timeoutMs);
-    await downloadToFile(checksumUrl, checksumPath, deps, timeoutMs);
-
-    const tarball = await readFile(tarballPath);
-    const actual = computeSha256(tarball);
-    const expected = parseChecksumFile(await readFile(checksumPath, "utf8"));
-    if (expected === null) {
-      throw new GaharError(
-        `Could not read a valid sha256 checksum from ${checksumUrl}. Refusing to install. ` +
-          `Install manually: ${MANUAL_INSTALL_COMMAND}`,
-        { code: "update_failed" },
-      );
-    }
-    if (actual !== expected) {
-      throw new GaharError(
-        `Checksum mismatch for ${RELEASE_ASSET_NAME}: expected ${expected}, got ${actual}. ` +
-          "Refusing to install. Download manually from the Releases page if you trust the source.",
-        { code: "update_failed" },
-      );
-    }
-    logLine(options, "Checksum verified.");
-
-    runNpmInstall(tarballPath, deps, options);
-    verifyInstalledVersion(latestVersion, deps, options);
-
-    const message = `Updated Gahar Code v${currentVersion} -> v${latestVersion}.`;
-    logLine(options, message);
-    return { updated: true, currentVersion, latestVersion, message };
+    await writeFile(tarballPath, tarball);
+    runNpmInstall(tarballPath, spawn, npm, log);
+    verifyInstalledVersion(latestVersion, spawn, npm, log);
   } catch (error) {
     if (error instanceof GaharError) throw error;
-    throw new GaharError(
-      `Update failed: ${toErrorMessage(error)}. Install manually: ${MANUAL_INSTALL_COMMAND}`,
-      { code: "update_failed", cause: error },
-    );
+    throw updateFailed(`Update failed: ${toErrorMessage(error)}.`, error);
   } finally {
-    if (workDir !== null) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+    if (workDir !== null)
+      await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+  const message = `Updated Gahar Code v${currentVersion} -> v${latestVersion}.`;
+  log(message);
+  return { updated: true, currentVersion, latestVersion, message };
 }
