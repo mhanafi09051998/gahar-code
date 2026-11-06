@@ -1,17 +1,13 @@
 import { APP_NAME } from "../shared/defaults.js";
 import { VERSION } from "../shared/version.js";
-import type { Writable } from "../cli/env.js";
 
 export interface BannerOptions {
-  stderr: Writable;
   version?: string;
   model: string;
   cwd: string;
   permissionMode: string;
   sessionId?: string;
   resumed?: boolean;
-  quiet?: boolean;
-  color?: boolean;
   columns?: number;
 }
 
@@ -29,11 +25,6 @@ export function createBanner(options: BannerOptions): string[] {
   }
   lines.push("", "Type /help for commands, Ctrl+C to cancel, Ctrl+D to exit.");
   return lines;
-}
-
-export function renderBanner(options: BannerOptions): void {
-  if (options.quiet === true) return;
-  options.stderr.write(`${createBanner(options).join("\n")}\n`);
 }
 
 export function shortenPath(cwd: string, maxLength: number): string {

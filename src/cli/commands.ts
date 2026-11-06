@@ -1,17 +1,17 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { App } from "../contracts/runner.js";
-import { pathExists, readTextFileIfExists } from "../shared/fsx.js";
+import { pathExists } from "../shared/fsx.js";
 import { formatCost } from "../ui/render.js";
 
 export interface CommandContext {
   app: App;
   cwd: string;
-  configDir: string;
   args: string[];
+  /** Whether OPENROUTER_API_KEY is set in the environment. */
+  envKey: boolean;
   setVerbose: (value: boolean) => void;
   verbose: boolean;
-  setModel: (model: string) => void;
   clearScreen: () => void;
   requestExit: () => void;
   print: (line: string) => void;
@@ -40,7 +40,6 @@ export const SLASH_COMMANDS: SlashCommand[] = [
         ctx.print(`model: ${ctx.app.meta.model}`);
         return;
       }
-      ctx.setModel(id);
       ctx.app.setModel(id);
       ctx.print(`model set to ${id}`);
     },
@@ -49,9 +48,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "/auth",
     summary: "show the API key source and status",
     run: (ctx) => {
-      const env = process.env.OPENROUTER_API_KEY;
       ctx.print(
-        env !== undefined && env !== ""
+        ctx.envKey
           ? "auth: using OPENROUTER_API_KEY from the environment"
           : "auth: key loaded from the config file; run 'gahar auth status' for details",
       );
@@ -128,7 +126,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     run: (ctx) => {
       const mode = ctx.args[0];
       if (mode === undefined) {
-        ctx.print("permission mode: ask | auto-edit | full-auto (change with 'gahar --permission-mode')");
+        ctx.print(
+          "permission mode: ask | auto-edit | full-auto (change with 'gahar --permission-mode')",
+        );
         return;
       }
       ctx.print(`permission mode is set at startup: restart with --permission-mode ${mode}`);
@@ -138,8 +138,9 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: "/verbose",
     summary: "toggle reasoning output",
     run: (ctx) => {
-      ctx.setVerbose(!ctx.verbose);
-      ctx.print(`verbose ${!ctx.verbose ? "off" : "on"}`);
+      const next = !ctx.verbose;
+      ctx.setVerbose(next);
+      ctx.print(`verbose ${next ? "on" : "off"}`);
     },
   },
   {
@@ -163,6 +164,25 @@ export function parseSlashInput(input: string): { name: string; args: string[] }
   if (!trimmed.startsWith("/")) return null;
   const [head = "", ...rest] = trimmed.split(/\s+/);
   return { name: head, args: rest };
+}
+
+/**
+ * Runs a slash command. Returns false when the input is not a slash command;
+ * unknown commands print a warning plus the command list.
+ */
+export async function dispatchSlash(
+  input: string,
+  base: Omit<CommandContext, "args">,
+): Promise<boolean> {
+  const parsed = parseSlashInput(input);
+  if (parsed === null) return false;
+  const command = findCommand(parsed.name);
+  if (command === undefined) {
+    base.print(`unknown command ${parsed.name}\n${helpLines().join("\n")}`);
+    return true;
+  }
+  await command.run({ ...base, args: parsed.args });
+  return true;
 }
 
 export function helpLines(): string[] {
@@ -197,12 +217,4 @@ function agentsStub(ctx: CommandContext): string {
     "- Update tests together with behavior changes.",
     "",
   ].join("\n");
-}
-
-export async function loadProjectInstructions(cwd: string): Promise<string | null> {
-  return readTextFileIfExists(join(cwd, "AGENTS.md"));
-}
-
-export async function ensureConfigDir(configDir: string): Promise<void> {
-  await mkdir(configDir, { recursive: true });
 }

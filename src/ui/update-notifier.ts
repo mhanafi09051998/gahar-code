@@ -1,34 +1,30 @@
-import { readFile } from "node:fs/promises";
-import { APP_NAME } from "../shared/defaults.js";
-import { VERSION } from "../shared/version.js";
+import { join } from "node:path";
 import { truthy, type Writable } from "../cli/env.js";
+import { BINARY_NAME } from "../shared/defaults.js";
+import { atomicWriteFile, ensureDir, readTextFileIfExists } from "../shared/fsx.js";
 
-export const UPDATE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
+export const UPDATE_NOTIFY_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_WAIT_MS = 3000;
 
 export interface UpdateCheckLike {
-  currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
-  releaseUrl: string;
 }
+
+export type UpdateChecker = (options: {
+  timeoutMs?: number;
+  configDir?: string;
+}) => Promise<UpdateCheckLike | null>;
 
 export interface UpdateNotifierOptions {
   stderr: Writable;
   configDir: string;
   enabled: boolean;
   env: NodeJS.ProcessEnv;
-  /** Injected for tests; defaults to the real release checker. */
-  check?: (options: { timeoutMs?: number }) => Promise<UpdateCheckLike | null>;
+  /** Injected for tests; defaults to the release teammate's checkForUpdate. */
+  check?: UpdateChecker;
   now?: () => number;
   timeoutMs?: number;
-  version?: string;
-}
-
-interface CacheShape {
-  checkedAt: number;
-  latestVersion: string;
-  updateAvailable: boolean;
-  releaseUrl: string;
 }
 
 export interface NotifyResult {
@@ -37,105 +33,78 @@ export interface NotifyResult {
   line?: string;
 }
 
-export function updateCachePath(configDir: string): string {
-  return `${configDir.replace(/[\\/]$/, "")}/cache/update-notify.json`;
-}
-
-export function shouldCheck(options: UpdateNotifierOptions, now: number): boolean {
-  if (!options.enabled) return false;
-  if (truthy(options.env.GAHAR_NO_UPDATE_CHECK)) return false;
-  void now;
-  return true;
+export function notifyStatePath(configDir: string): string {
+  return join(configDir, "cache", "update-notify.json");
 }
 
 export function formatUpdateLine(latestVersion: string): string {
-  return `Update available: ${VERSION} -> ${latestVersion} -> run: gahar update`;
+  return `Update available: ${latestVersion} -> run: ${BINARY_NAME} update`;
 }
 
-/** Reads the cached check result; returns null when it is missing, stale or corrupt. */
-export async function readCache(configDir: string, now: number): Promise<CacheShape | null> {
+/** True when a notice was already printed within the last 24h. */
+export async function notifiedRecently(configDir: string, now: number): Promise<boolean> {
   try {
-    const raw = await readFile(updateCachePath(configDir), "utf8");
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return null;
-    const cache = parsed as Partial<CacheShape>;
-    if (
-      typeof cache.checkedAt !== "number" ||
-      typeof cache.latestVersion !== "string" ||
-      typeof cache.releaseUrl !== "string"
-    ) {
-      return null;
-    }
-    if (now - cache.checkedAt > UPDATE_CHECK_TTL_MS) return null;
-    return {
-      checkedAt: cache.checkedAt,
-      latestVersion: cache.latestVersion,
-      updateAvailable: cache.updateAvailable === true,
-      releaseUrl: cache.releaseUrl,
-    };
+    const raw = await readTextFileIfExists(notifyStatePath(configDir));
+    if (raw === null) return false;
+    const parsed = JSON.parse(raw) as { notifiedAt?: unknown };
+    return typeof parsed.notifiedAt === "number" && now - parsed.notifiedAt < UPDATE_NOTIFY_TTL_MS;
   } catch {
-    return null;
+    return false;
   }
 }
 
-export async function loadUpdateCheck(): Promise<
-  ((options: { timeoutMs?: number }) => Promise<UpdateCheckLike | null>) | null
-> {
+async function rememberNotified(configDir: string, now: number): Promise<void> {
   try {
-    const mod = (await import("../update/check.js")) as {
-      checkForUpdate?: (options?: { timeoutMs?: number }) => Promise<UpdateCheckLike | null>;
-    };
-    if (typeof mod.checkForUpdate !== "function") return null;
-    return mod.checkForUpdate;
+    await ensureDir(join(configDir, "cache"));
+    await atomicWriteFile(notifyStatePath(configDir), `${JSON.stringify({ notifiedAt: now })}\n`);
+  } catch {
+    // Best effort: worst case the notice repeats.
+  }
+}
+
+async function loadUpdateCheck(): Promise<UpdateChecker | null> {
+  try {
+    const mod = (await import("../update/check.js")) as { checkForUpdate?: UpdateChecker };
+    return typeof mod.checkForUpdate === "function" ? mod.checkForUpdate : null;
   } catch {
     return null;
   }
 }
 
 /**
- * Non-blocking update check. Never throws, never delays startup beyond the
- * timeout, and prints at most one stderr line per 24h.
+ * Non-blocking update check. Never throws, never waits longer than 3s, and
+ * prints at most one stderr line per 24h.
  */
 export async function notifyUpdate(options: UpdateNotifierOptions): Promise<NotifyResult> {
   const now = (options.now ?? Date.now)();
   try {
-    if (!shouldCheck(options, now)) return { checked: false, printed: false };
-    const cache = await readCache(options.configDir, now);
-    if (cache !== null && cache.updateAvailable) {
-      const line = formatUpdateLine(cache.latestVersion);
-      options.stderr.write(`${line}\n`);
-      return { checked: false, printed: true, line };
+    if (!options.enabled || truthy(options.env.GAHAR_NO_UPDATE_CHECK)) {
+      return { checked: false, printed: false };
     }
-    if (cache !== null) return { checked: false, printed: false };
+    if (await notifiedRecently(options.configDir, now)) return { checked: false, printed: false };
     const check = options.check ?? (await loadUpdateCheck());
     if (check === null) return { checked: false, printed: false };
-    const result = await withTimeout(check({ timeoutMs: options.timeoutMs ?? 3000 }), 3000);
-    if (result === null || result.updateAvailable !== true) return { checked: true, printed: false };
+    const timeoutMs = Math.min(options.timeoutMs ?? MAX_WAIT_MS, MAX_WAIT_MS);
+    const result = await withTimeout(check({ timeoutMs, configDir: options.configDir }), timeoutMs);
+    if (result === null || !result.updateAvailable) return { checked: true, printed: false };
     const line = formatUpdateLine(result.latestVersion);
     options.stderr.write(`${line}\n`);
+    await rememberNotified(options.configDir, now);
     return { checked: true, printed: true, line };
   } catch {
     return { checked: false, printed: false };
   }
 }
 
-export function bannerTitle(): string {
-  return `${APP_NAME} ${VERSION}`;
-}
-
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
-  let timer: NodeJS.Timeout | null = null;
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+    timer.unref?.();
+  });
   try {
-    return await Promise.race([
-      promise,
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), ms);
-        if (typeof timer.unref === "function") timer.unref();
-      }),
-    ]);
-  } catch {
-    return null;
+    return await Promise.race([promise.catch(() => null), timeout]);
   } finally {
-    if (timer !== null) clearTimeout(timer);
+    clearTimeout(timer);
   }
 }

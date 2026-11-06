@@ -1,32 +1,32 @@
-import { createInterface, type Interface } from "node:readline";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { Writable } from "../cli/env.js";
+import { createInterface, type Interface } from "node:readline";
 
 export const MAX_HISTORY = 200;
+/** Lines arriving within this window after the first one are treated as one paste. */
+const PASTE_WINDOW_MS = 25;
+const DOUBLE_INTERRUPT_MS = 2000;
 
 export interface PromptOptions {
   configDir: string;
-  stderr: Writable;
-  /** When true an interactive readline prompt is used; otherwise a single read. */
+  /** When true an interactive readline prompt is used; otherwise stdin is read once. */
   interactive: boolean;
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
   promptLabel?: string;
-  /** Signals that the user pressed Ctrl+C while a turn was running. */
+  /** Called when the user presses Ctrl+C while a turn is running. */
   onInterrupt?: () => void;
 }
 
-export type PromptResult =
-  | { kind: "line"; text: string }
-  | { kind: "eof" }
-  | { kind: "interrupt" };
+export type PromptResult = { kind: "line"; text: string } | { kind: "eof" } | { kind: "interrupt" };
 
 export interface LineEditor {
   read(): Promise<PromptResult>;
+  /** Asks a one-line question (used by approval prompts while a turn runs). */
+  ask(question: string): Promise<string>;
   close(): void;
   /** True while a turn is running: Ctrl+C aborts the turn instead of exiting. */
   setBusy(busy: boolean): void;
-  /** Ctrl+C pressed twice at an empty prompt: exit with 130. */
-  readonly interruptedTwice: boolean;
   readonly history: string[];
 }
 
@@ -34,6 +34,7 @@ export function historyPath(configDir: string): string {
   return join(configDir, "history.txt");
 }
 
+/** Loads history newest first (the order readline expects). */
 export async function loadHistory(configDir: string, limit = MAX_HISTORY): Promise<string[]> {
   try {
     const raw = await readFile(historyPath(configDir), "utf8");
@@ -44,6 +45,7 @@ export async function loadHistory(configDir: string, limit = MAX_HISTORY): Promi
   }
 }
 
+/** Persists newest-first history as an oldest-first file capped at MAX_HISTORY lines. */
 export async function saveHistory(configDir: string, history: readonly string[]): Promise<void> {
   const file = historyPath(configDir);
   try {
@@ -55,40 +57,55 @@ export async function saveHistory(configDir: string, history: readonly string[])
   }
 }
 
-export async function appendHistory(configDir: string, entry: string): Promise<void> {
-  const text = entry.trim();
-  if (text === "") return;
-  try {
-    await mkdir(configDir, { recursive: true });
-    await appendFile(historyPath(configDir), `${text.replace(/\r?\n/g, " ")}\n`, "utf8");
-  } catch {
-    // Ignore: history persistence is best effort.
-  }
+/** Adds an entry to newest-first history, de-duplicating and capping the size. */
+export function pushHistory(history: readonly string[], entry: string): string[] {
+  const text = entry.replace(/\r?\n/g, " ").trim();
+  if (text === "") return [...history];
+  return [text, ...history.filter((item) => item !== text)].slice(0, MAX_HISTORY);
 }
 
 export function createLineEditor(options: PromptOptions): LineEditor {
-  return new ReadlineEditor(options);
+  return options.interactive ? new ReadlineEditor(options) : new OnceEditor(options);
+}
+
+/** Non-TTY editor: the whole of stdin is one prompt, then EOF. */
+class OnceEditor implements LineEditor {
+  private consumed = false;
+  readonly history: string[] = [];
+
+  constructor(private readonly options: PromptOptions) {}
+
+  async read(): Promise<PromptResult> {
+    if (this.consumed) return { kind: "eof" };
+    this.consumed = true;
+    const text = (await readAll(this.options.input ?? process.stdin)).replace(/\r?\n$/, "");
+    return text.trim() === "" ? { kind: "eof" } : { kind: "line", text };
+  }
+
+  async ask(): Promise<string> {
+    return "";
+  }
+
+  setBusy(): void {}
+
+  close(): void {}
 }
 
 class ReadlineEditor implements LineEditor {
-  private readonly options: PromptOptions;
   private rl: Interface | null = null;
   private busy = false;
-  private lastInterruptAt = 0;
   private closed = false;
-  historyEntries: string[] = [];
-  private resolvePending: ((result: PromptResult) => void) | null = null;
+  private lastInterruptAt = 0;
+  private entries: string[] = [];
+  private pending: ((result: PromptResult) => void) | null = null;
+  private askPending: ((answer: string) => void) | null = null;
+  private pasteLines: string[] = [];
+  private pasteTimer: NodeJS.Timeout | null = null;
 
-  constructor(options: PromptOptions) {
-    this.options = options;
-  }
+  constructor(private readonly options: PromptOptions) {}
 
   get history(): string[] {
-    return this.historyEntries;
-  }
-
-  get interruptedTwice(): boolean {
-    return this.lastInterruptAt > 0;
+    return this.entries;
   }
 
   setBusy(busy: boolean): void {
@@ -97,105 +114,110 @@ class ReadlineEditor implements LineEditor {
   }
 
   async read(): Promise<PromptResult> {
-    if (!this.options.interactive) return this.readOnce();
-    const rl = this.ensureInterface();
+    const rl = await this.ensureInterface();
+    if (this.closed) return { kind: "eof" };
     return new Promise<PromptResult>((resolve) => {
-      this.resolvePending = resolve;
-      rl.question(this.options.promptLabel ?? "> ", (answer) => {
-        this.resolvePending = null;
-        if (answer.trim() !== "") {
-          this.historyEntries = [answer, ...this.historyEntries.filter((h) => h !== answer)];
-          if (this.historyEntries.length > MAX_HISTORY) this.historyEntries.length = MAX_HISTORY;
-          void appendHistory(this.options.configDir, answer);
-        }
-        resolve({ kind: "line", text: answer });
-      });
-      rl.once("close", () => {
-        if (this.resolvePending !== null) {
-          this.resolvePending = null;
-          resolve({ kind: "eof" });
-        }
-      });
+      this.pending = resolve;
+      rl.setPrompt(this.options.promptLabel ?? "> ");
+      rl.prompt();
     });
   }
 
-  private ensureInterface(): Interface {
-    if (this.rl !== null) return this.rl;
-    const rl = createInterface({ input: process.stdin, output: this.options.stderr, terminal: true });
-    rl.on("SIGINT", () => {
-      const now = Date.now();
-      if (this.busy) {
-        this.options.onInterrupt?.();
-        this.lastInterruptAt = 0;
-        return;
-      }
-      if (now - this.lastInterruptAt < 2000) {
-        this.lastInterruptAt = now;
-        this.finish({ kind: "interrupt" });
-        return;
-      }
-      this.lastInterruptAt = now;
-      this.options.stderr.write("\n(^C again to exit)\n");
-      if (this.resolvePending !== null) {
-        const resolve = this.resolvePending;
-        this.resolvePending = null;
-        resolve({ kind: "line", text: "" });
-      }
+  async ask(question: string): Promise<string> {
+    const rl = await this.ensureInterface();
+    if (this.closed) return "";
+    return new Promise<string>((resolve) => {
+      this.askPending = resolve;
+      rl.setPrompt(question);
+      rl.prompt();
     });
+  }
+
+  close(): void {
+    if (this.rl !== null && !this.closed) this.rl.close();
+    this.rl = null;
+  }
+
+  private async ensureInterface(): Promise<Interface> {
+    if (this.rl !== null) return this.rl;
+    this.entries = await loadHistory(this.options.configDir);
+    const rl = createInterface({
+      input: this.options.input ?? process.stdin,
+      output: this.options.output ?? process.stderr,
+      terminal: true,
+      history: [...this.entries],
+      historySize: MAX_HISTORY,
+    });
+    rl.on("line", (line) => this.onLine(line));
+    rl.on("SIGINT", () => this.onSigint());
     rl.on("close", () => {
       this.closed = true;
+      this.resolveAsk("");
+      this.settle({ kind: "eof" });
     });
     this.rl = rl;
     return rl;
   }
 
-  private finish(result: PromptResult): void {
-    if (this.resolvePending !== null) {
-      const resolve = this.resolvePending;
-      this.resolvePending = null;
-      resolve(result);
+  private onLine(line: string): void {
+    if (this.askPending !== null) {
+      this.resolveAsk(line);
+      return;
     }
+    if (this.pending === null) return;
+    this.pasteLines.push(line);
+    if (this.pasteTimer !== null) clearTimeout(this.pasteTimer);
+    this.pasteTimer = setTimeout(() => this.flushPaste(), PASTE_WINDOW_MS);
   }
 
-  private async readOnce(): Promise<PromptResult> {
-    const chunks: Buffer[] = [];
-    const input = process.stdin;
-    return new Promise<PromptResult>((resolve) => {
-      const onData = (chunk: Buffer): void => {
-        chunks.push(chunk);
-        const text = Buffer.concat(chunks).toString("utf8");
-        const newline = text.indexOf("\n");
-        if (newline >= 0) {
-          cleanup();
-          resolve({ kind: "line", text: text.slice(0, newline).replace(/\r$/, "") });
-        }
-      };
-      const onEnd = (): void => {
-        cleanup();
-        const text = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
-        resolve(text === "" ? { kind: "eof" } : { kind: "line", text });
-      };
-      const cleanup = (): void => {
-        input.off("data", onData);
-        input.off("end", onEnd);
-        input.off("error", onEnd);
-      };
-      input.on("data", onData);
-      input.once("end", onEnd);
-      input.once("error", onEnd);
-      if (typeof input.resume === "function") input.resume();
-    });
+  private flushPaste(): void {
+    this.pasteTimer = null;
+    const text = this.pasteLines.join("\n");
+    this.pasteLines = [];
+    if (text.trim() !== "") {
+      this.entries = pushHistory(this.entries, text);
+      void saveHistory(this.options.configDir, this.entries);
+    }
+    this.settle({ kind: "line", text });
   }
 
-  close(): void {
-    if (this.rl !== null && !this.closed) {
-      this.rl.close();
-      this.rl = null;
+  private onSigint(): void {
+    if (this.busy) {
+      this.resolveAsk("");
+      this.options.onInterrupt?.();
+      return;
     }
+    const now = Date.now();
+    if (now - this.lastInterruptAt < DOUBLE_INTERRUPT_MS) {
+      this.settle({ kind: "interrupt" });
+      return;
+    }
+    this.lastInterruptAt = now;
+    (this.options.output ?? process.stderr).write("\n(^C again to exit)\n");
+    this.settle({ kind: "line", text: "" });
+  }
+
+  private settle(result: PromptResult): void {
+    const resolve = this.pending;
+    this.pending = null;
+    resolve?.(result);
+  }
+
+  private resolveAsk(answer: string): void {
+    const resolve = this.askPending;
+    this.askPending = null;
+    resolve?.(answer);
   }
 }
 
-/** Splits a pasted multi-line block into a single prompt string. */
-export function normalizePastedInput(input: string): string {
-  return input.replace(/\r\n/g, "\n").replace(/\n+$/, "");
+async function readAll(input: NodeJS.ReadableStream): Promise<string> {
+  const chunks: Buffer[] = [];
+  try {
+    for await (const chunk of input) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+  } catch {
+    // A broken pipe ends the read with whatever arrived.
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }
