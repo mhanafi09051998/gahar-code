@@ -1,4 +1,5 @@
 import type { LoadedConfig, ResolvedConfig } from "../contracts/config.js";
+import { GaharError } from "../shared/errors.js";
 
 export interface ApiKeySource {
   apiKey: string | null;
@@ -10,20 +11,18 @@ export interface ResolvedKey {
   source: "env" | "config" | "none";
 }
 
-/** Resolves the API key and where it came from. */
 /** Extracts apiKey/apiKeySource from either a LoadedConfig or a ResolvedConfig. */
 export function apiKeySourceOf(loaded: LoadedConfig | ResolvedConfig | ApiKeySource): ApiKeySource {
   if ("config" in loaded) return loaded.config;
   return loaded;
 }
 
+/** Resolves the API key and its source from the already-resolved config (env wins there). */
 export function resolveApiKey(loaded: LoadedConfig | ResolvedConfig | ApiKeySource): ResolvedKey {
-  const source = apiKeySourceOf(loaded);
-  const envKey = normalize(process.env.OPENROUTER_API_KEY);
-  if (envKey) return { key: envKey, source: "env" };
-  const configKey = normalize(source.apiKey);
-  if (configKey) return { key: configKey, source: "config" };
-  return { key: null, source: "none" };
+  const { apiKey, apiKeySource } = apiKeySourceOf(loaded);
+  const key = normalize(apiKey);
+  if (!key || apiKeySource === "none") return { key: null, source: "none" };
+  return { key, source: apiKeySource };
 }
 
 function normalize(value: string | null | undefined): string | null {
@@ -49,11 +48,10 @@ export function looksLikeApiKey(key: string): boolean {
 
 export function requireApiKey(resolved: ResolvedKey): string {
   if (!resolved.key) {
-    const error = new Error(
+    throw new GaharError(
       "No OpenRouter API key configured. Set OPENROUTER_API_KEY or run: gahar auth login",
+      { code: "missing_api_key", exitCode: 3 },
     );
-    error.name = "MissingApiKeyError";
-    throw error;
   }
   return resolved.key;
 }

@@ -1,7 +1,7 @@
-import type { KeyInfo } from "../contracts/messages.js";
-import { GaharError } from "../shared/errors.js";
 import { clearGlobalApiKey, globalConfigPath, saveGlobalConfig } from "../config/index.js";
-import { looksLikeApiKey, maskKey, resolveApiKey, type ApiKeySource, type ResolvedKey } from "./key.js";
+import type { KeyInfo } from "../contracts/messages.js";
+import { GaharError, toErrorMessage } from "../shared/errors.js";
+import { type ApiKeySource, looksLikeApiKey, maskKey, resolveApiKey } from "./key.js";
 
 export interface KeyValidator {
   validateKey(key?: string): Promise<KeyInfo>;
@@ -38,24 +38,15 @@ export async function login(
       { code: "invalid_api_key", exitCode: 3 },
     );
   }
-  await client.validateKey(trimmed);
+  const info = await client.validateKey(trimmed);
   const configPath = await saveGlobalConfig(configDir, { apiKey: trimmed });
-  return {
-    key: trimmed,
-    maskedKey: maskKey(trimmed),
-    configPath,
-    info: await client.validateKey(trimmed),
-  };
+  return { key: trimmed, maskedKey: maskKey(trimmed), configPath, info };
 }
 
 /** Removes the apiKey from the global config. */
 export async function logout(configDir: string): Promise<{ removed: boolean; configPath: string }> {
   const removed = await clearGlobalApiKey(configDir);
   return { removed, configPath: globalConfigPath(configDir) };
-}
-
-export function resolveKeyForStatus(loaded: ApiKeySource): ResolvedKey {
-  return resolveApiKey(loaded);
 }
 
 /** Reports source, masked key and /key metadata without leaking the key. */
@@ -75,7 +66,7 @@ export async function status(
   try {
     base.info = await client.validateKey();
   } catch (error) {
-    base.error = error instanceof Error ? error.message : String(error);
+    base.error = toErrorMessage(error);
   }
   return base;
 }

@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { OpenRouterClient } from "../../../dist/api/openrouter.js";
 import { readModelCache } from "../../../dist/api/models.js";
+import { OpenRouterClient } from "../../../dist/api/openrouter.js";
 
 const encoder = new TextEncoder();
 
@@ -15,7 +15,11 @@ function sseResponse(chunks, init = {}) {
       controller.close();
     },
   });
-  return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" }, ...init });
+  return new Response(body, {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+    ...init,
+  });
 }
 
 function jsonResponse(value, status = 200, headers = {}) {
@@ -193,10 +197,16 @@ test("listModels filters :batch variants and caches to disk", async () => {
       { configDir: dir },
     );
     const models = await client.listModels();
-    assert.deepEqual(models.map((m) => m.id), ["a/model"]);
+    assert.deepEqual(
+      models.map((m) => m.id),
+      ["a/model"],
+    );
     assert.equal(models[0].context_length, 1000);
     const cached = await readModelCache(dir);
-    assert.deepEqual(cached.map((m) => m.id), ["a/model"]);
+    assert.deepEqual(
+      cached.map((m) => m.id),
+      ["a/model"],
+    );
     const raw = JSON.parse(await readFile(join(dir, "cache", "models.json"), "utf8"));
     assert.equal(typeof raw.fetchedAt, "number");
     await client.listModels();
@@ -210,7 +220,9 @@ test("listModels filters :batch variants and caches to disk", async () => {
 
 test("validateKey maps /key payload and 401 to exit code 3", async () => {
   const client = makeClient(async () =>
-    jsonResponse({ data: { label: "k", limit: 10, usage: 1.5, limit_remaining: 8.5, is_free_tier: false } }),
+    jsonResponse({
+      data: { label: "k", limit: 10, usage: 1.5, limit_remaining: 8.5, is_free_tier: false },
+    }),
   );
   const info = await client.validateKey("sk-or-v1-other");
   assert.equal(info.limit, 10);
@@ -221,4 +233,45 @@ test("validateKey maps /key payload and 401 to exit code 3", async () => {
     () => bad.validateKey("sk-or-v1-bad"),
     (error) => error.exitCode === 3,
   );
+});
+
+test("retries a mid-stream 502 payload when nothing was emitted yet", async () => {
+  let attempts = 0;
+  const client = makeClient(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return sseResponse(['data: {"error":{"message":"upstream","code":502}}\n\n']);
+    }
+    return sseResponse(okStream);
+  });
+  const result = await client.streamChat({ model: "m", messages: [] }, {});
+  assert.equal(attempts, 2);
+  assert.equal(result.message.content, "Hi");
+});
+
+test("does not retry once text was streamed to the caller", async () => {
+  let attempts = 0;
+  const client = makeClient(async () => {
+    attempts += 1;
+    return sseResponse([
+      'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+      'data: {"error":{"message":"overloaded","code":503}}\n\n',
+    ]);
+  });
+  const deltas = [];
+  await assert.rejects(
+    () => client.streamChat({ model: "m", messages: [] }, { onText: (t) => deltas.push(t) }),
+    /overloaded/,
+  );
+  assert.equal(attempts, 1);
+  assert.deepEqual(deltas, ["partial"]);
+});
+
+test("streams without [DONE] do not lose deltas on the next call", async () => {
+  const client = makeClient(async () => sseResponse(okStream.slice(0, 2)));
+  for (let i = 0; i < 2; i++) {
+    const deltas = [];
+    await client.streamChat({ model: "m", messages: [] }, { onText: (t) => deltas.push(t) });
+    assert.deepEqual(deltas, ["Hi"]);
+  }
 });

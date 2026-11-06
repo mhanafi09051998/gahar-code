@@ -1,5 +1,13 @@
-import { GaharError } from "../shared/errors.js";
-import { apiErrorFromBody, extractMessage, isRetryableStatus, retryAfterMs } from "./errors.js";
+import { GaharError, isAbortError, toErrorMessage } from "../shared/errors.js";
+import {
+  abortError,
+  apiErrorFromBody,
+  apiErrorFromPayload,
+  extractMessage,
+  isRetryableStatus,
+  payloadStatus,
+  retryAfterMs,
+} from "./errors.js";
 
 export class HttpStatusError extends GaharError {
   readonly status: number;
@@ -14,7 +22,7 @@ export class HttpStatusError extends GaharError {
 
 export class NetworkError extends GaharError {
   constructor(error: unknown) {
-    super(`Could not reach OpenRouter: ${describeNetwork(error)}`, {
+    super(`Could not reach OpenRouter: ${toErrorMessage(error)}`, {
       code: "network_error",
       cause: error,
     });
@@ -27,27 +35,14 @@ export function httpError(status: number, body: string, response: Response): Gah
   return new HttpStatusError(base, status, retryAfter);
 }
 
+/** Error for a provider error object received inside the SSE stream. */
+export function streamPayloadError(payload: unknown): GaharError {
+  return new HttpStatusError(apiErrorFromPayload(payload), payloadStatus(payload), null);
+}
+
 export function networkError(error: unknown): GaharError {
-  if (isAbort(error)) return abortError();
+  if (isAbortError(error)) return abortError();
   return new NetworkError(error);
-}
-
-export function isAbort(error: unknown): boolean {
-  return (
-    (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) ||
-    false
-  );
-}
-
-export function abortError(): GaharError {
-  const error = new GaharError("Request aborted", { code: "aborted" });
-  error.name = "AbortError";
-  return error;
-}
-
-function describeNetwork(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
 }
 
 export function isRetryable(error: unknown): boolean {

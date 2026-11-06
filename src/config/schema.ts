@@ -4,8 +4,18 @@ import { DEFAULT_BASE_URL, DEFAULT_MAX_TOKENS, DEFAULT_MODEL } from "../shared/d
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "full-auto"];
 const SECRET_FIELD = /^(api[-_]?key|.*(?:key|token|secret))$/i;
 
+/** Validated config fields; updateCheck and baseUrl are honored only in the global file. */
+export interface ConfigValues extends ProjectConfig {
+  updateCheck?: boolean;
+  baseUrl?: string;
+}
+
+export type ConfigScope = "global" | "project";
+
+const GLOBAL_ONLY_FIELDS = new Set(["updateCheck", "baseUrl"]);
+
 export interface NormalizeResult {
-  values: ProjectConfig;
+  values: ConfigValues;
   secretsIgnored: string[];
   unknownFields: string[];
 }
@@ -15,13 +25,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Validates one raw config object; unknown/invalid fields become warnings. */
-export function normalizeConfig(raw: unknown): NormalizeResult {
+export function normalizeConfig(raw: unknown, scope: ConfigScope = "global"): NormalizeResult {
   const result: NormalizeResult = { values: {}, secretsIgnored: [], unknownFields: [] };
   if (!isRecord(raw)) {
     if (raw !== undefined && raw !== null) result.unknownFields.push("<root>");
     return result;
   }
   for (const [key, value] of Object.entries(raw)) {
+    if (scope === "project" && GLOBAL_ONLY_FIELDS.has(key)) {
+      result.unknownFields.push(key);
+      continue;
+    }
     switch (key) {
       case "version":
       case "$schema":
@@ -29,7 +43,8 @@ export function normalizeConfig(raw: unknown): NormalizeResult {
         if (key === "apiKey") result.secretsIgnored.push(key);
         break;
       case "model":
-        if (typeof value === "string" && value.trim().length > 0) result.values.model = value.trim();
+        if (typeof value === "string" && value.trim().length > 0)
+          result.values.model = value.trim();
         else result.unknownFields.push(key);
         break;
       case "maxTokens":
@@ -42,6 +57,12 @@ export function normalizeConfig(raw: unknown): NormalizeResult {
           result.values.permissionMode = value;
         } else result.unknownFields.push(key);
         break;
+      case "baseUrl":
+        if (typeof value === "string" && value.trim().length > 0)
+          result.values.baseUrl = value.trim();
+        else result.unknownFields.push(key);
+        break;
+      case "updateCheck":
       case "contextCompaction":
       case "showReasoning":
         if (typeof value === "boolean") result.values[key] = value;
@@ -104,6 +125,7 @@ export function readEnvOverrides(env: NodeJS.ProcessEnv = process.env): EnvOverr
   }
   if (isTruthy(env.GAHAR_NO_UPDATE_CHECK)) overrides.noUpdateCheck = true;
   if (isTruthy(env.GAHAR_DEBUG)) overrides.debug = true;
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") overrides.noColor = true;
   return overrides;
 }
 
@@ -119,4 +141,4 @@ export const CONFIG_DEFAULTS = {
   baseUrl: DEFAULT_BASE_URL,
 } as const;
 
-export type { GaharConfig, ProjectConfig };
+export type { GaharConfig };

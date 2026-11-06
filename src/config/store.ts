@@ -6,14 +6,7 @@ import type {
   ProjectConfig,
   ResolvedConfig,
 } from "../contracts/config.js";
-import { GaharError } from "../shared/errors.js";
-import {
-  atomicWriteFile,
-  ensureDir,
-  isErrno,
-  pathExists,
-  readTextFileIfExists,
-} from "../shared/fsx.js";
+import { atomicWriteFile, ensureDir, readTextFileIfExists } from "../shared/fsx.js";
 import {
   defaultConfigDir,
   globalConfigBackupPath,
@@ -23,10 +16,11 @@ import {
 } from "./paths.js";
 import {
   CONFIG_DEFAULTS,
+  type ConfigValues,
+  type EnvOverrides,
   normalizeConfig,
   parseConfigText,
   readEnvOverrides,
-  type EnvOverrides,
 } from "./schema.js";
 
 export interface LoadOptions {
@@ -39,20 +33,21 @@ export interface LoadOptions {
 
 const CONFIG_MODE = 0o600;
 
+/** Reads one config file; a corrupt global file is backed up to backupPath. */
 async function readConfigFile(
   filePath: string,
-  kind: "global" | "project",
+  backupPath: string | null,
   warnings: string[],
 ): Promise<Record<string, unknown> | null> {
   const text = await readTextFileIfExists(filePath);
   if (text === null) return null;
   const parsed = parseConfigText(text);
   if (parsed.error !== null) {
-    if (kind === "global") {
+    if (backupPath !== null) {
       try {
-        await atomicWriteFile(globalConfigBackupPathFor(filePath), text);
+        await atomicWriteFile(backupPath, text, { mode: CONFIG_MODE });
         warnings.push(
-          `Global config was corrupt (${parsed.error}); backed up to ${globalConfigBackupPathFor(filePath)} and defaults were used.`,
+          `Global config was corrupt (${parsed.error}); backed up to ${backupPath} and defaults were used.`,
         );
       } catch {
         warnings.push(`Global config was corrupt (${parsed.error}) and could not be backed up.`);
@@ -62,17 +57,11 @@ async function readConfigFile(
     }
     return null;
   }
-  if (parsed.value === null || typeof parsed.value !== "object") {
+  if (parsed.value === null || typeof parsed.value !== "object" || Array.isArray(parsed.value)) {
     warnings.push(`Config file ${filePath} does not contain a JSON object; it was ignored.`);
     return null;
   }
   return parsed.value as Record<string, unknown>;
-}
-
-function globalConfigBackupPathFor(filePath: string): string {
-  return filePath.endsWith("config.json")
-    ? filePath.slice(0, -"config.json".length) + "config.json.bak"
-    : `${filePath}.bak`;
 }
 
 /** Loads config with precedence CLI > env > project > global > defaults. */
@@ -87,10 +76,10 @@ export async function loadConfig(options: LoadOptions): Promise<LoadedConfig> {
   const globalPath = globalConfigPath(configDir);
   const projectPath = projectConfigPath(cwd);
 
-  const globalRaw = await readConfigFile(globalPath, "global", warnings);
-  const projectRaw = await readConfigFile(projectPath, "project", warnings);
-  const global = normalizeConfig(globalRaw);
-  const project = normalizeConfig(projectRaw);
+  const globalRaw = await readConfigFile(globalPath, globalConfigBackupPath(configDir), warnings);
+  const projectRaw = await readConfigFile(projectPath, null, warnings);
+  const global = normalizeConfig(globalRaw, "global");
+  const project = normalizeConfig(projectRaw, "project");
   reportWarnings("global", global, warnings);
   reportWarnings("project", project, warnings);
   if (envOverrides.invalidPermissionMode) {
@@ -100,7 +89,6 @@ export async function loadConfig(options: LoadOptions): Promise<LoadedConfig> {
   }
 
   const globalConfig = toGaharConfig(global.values, globalRaw);
-  const globalBaseUrl = typeof globalRaw?.baseUrl === "string" ? globalRaw.baseUrl : undefined;
   const projectConfig: ProjectConfig | null = projectRaw ? { ...project.values } : null;
   const apiKey = envOverrides.apiKey ?? globalConfig.apiKey ?? null;
   const apiKeySource: ResolvedConfig["apiKeySource"] = envOverrides.apiKey
@@ -126,14 +114,16 @@ export async function loadConfig(options: LoadOptions): Promise<LoadedConfig> {
       projectConfig?.permissionMode ??
       globalConfig.permissionMode ??
       "ask",
-    updateCheck: pickBoolean(
-      envOverrides.noUpdateCheck === true ? false : undefined,
-      globalConfig.updateCheck,
-    ) ?? true,
+    updateCheck:
+      pickBoolean(
+        envOverrides.noUpdateCheck === true ? false : undefined,
+        globalConfig.updateCheck,
+      ) ?? true,
     contextCompaction:
       pickBoolean(projectConfig?.contextCompaction, globalConfig.contextCompaction) ?? true,
     showReasoning: pickBoolean(projectConfig?.showReasoning, globalConfig.showReasoning) ?? false,
-    baseUrl: pick(cli.baseUrl, envOverrides.baseUrl, globalBaseUrl) ?? CONFIG_DEFAULTS.baseUrl,
+    baseUrl:
+      pick(cli.baseUrl, envOverrides.baseUrl, global.values.baseUrl) ?? CONFIG_DEFAULTS.baseUrl,
     debug: cli.debug ?? envOverrides.debug ?? false,
     noColor: cli.noColor ?? envOverrides.noColor ?? false,
     warnings,
@@ -148,7 +138,11 @@ export async function loadConfig(options: LoadOptions): Promise<LoadedConfig> {
   };
 }
 
-function reportWarnings(scope: string, result: ReturnType<typeof normalizeConfig>, warnings: string[]): void {
+function reportWarnings(
+  scope: string,
+  result: ReturnType<typeof normalizeConfig>,
+  warnings: string[],
+): void {
   for (const field of result.secretsIgnored) {
     if (scope === "project") {
       warnings.push(
@@ -164,7 +158,7 @@ function reportWarnings(scope: string, result: ReturnType<typeof normalizeConfig
   }
 }
 
-function toGaharConfig(values: ProjectConfig, raw: Record<string, unknown> | null): GaharConfig {
+function toGaharConfig(values: ConfigValues, raw: Record<string, unknown> | null): GaharConfig {
   const config: GaharConfig = { version: 1 };
   if (raw && typeof raw.apiKey === "string" && raw.apiKey.trim().length > 0) {
     config.apiKey = raw.apiKey.trim();
@@ -174,8 +168,7 @@ function toGaharConfig(values: ProjectConfig, raw: Record<string, unknown> | nul
   if (values.permissionMode !== undefined) config.permissionMode = values.permissionMode;
   if (values.contextCompaction !== undefined) config.contextCompaction = values.contextCompaction;
   if (values.showReasoning !== undefined) config.showReasoning = values.showReasoning;
-  const updateCheck = (raw?.updateCheck ?? undefined) as boolean | undefined;
-  if (updateCheck !== undefined) config.updateCheck = updateCheck;
+  if (values.updateCheck !== undefined) config.updateCheck = values.updateCheck;
   return config;
 }
 
@@ -265,23 +258,8 @@ export async function readGlobalConfig(
   if (parsed.error !== null || !parsed.value || typeof parsed.value !== "object") {
     return { version: 1 };
   }
-  return toGaharConfig(normalizeConfig(parsed.value).values, parsed.value as Record<string, unknown>);
-}
-
-export async function configFileExists(filePath: string): Promise<boolean> {
-  try {
-    return await pathExists(filePath);
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-
-export { projectConfigPath, globalConfigPath };
-
-export function assertConfigDir(dir: string): string {
-  if (!dir || dir.trim().length === 0) {
-    throw new GaharError("Config directory must not be empty", { code: "invalid_config_dir" });
-  }
-  return dir;
+  return toGaharConfig(
+    normalizeConfig(parsed.value).values,
+    parsed.value as Record<string, unknown>,
+  );
 }

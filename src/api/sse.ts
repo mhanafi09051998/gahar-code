@@ -115,7 +115,20 @@ export interface StreamAccumulator {
   usage: Record<string, unknown> | undefined;
   model: string | undefined;
   generationId: string | undefined;
-  error: unknown | undefined;
+  error: unknown;
+}
+
+export function newAccumulator(): StreamAccumulator {
+  return {
+    content: "",
+    reasoning: "",
+    toolCalls: [],
+    finishReason: null,
+    usage: undefined,
+    model: undefined,
+    generationId: undefined,
+    error: undefined,
+  };
 }
 
 interface DeltaFragment {
@@ -156,7 +169,7 @@ function toolCallAt(list: ToolCall[], index: number): ToolCall {
 /** Applies one decoded SSE payload to the accumulator. Returns false for [DONE]. */
 export function applySsePayload(acc: StreamAccumulator, payload: string): boolean {
   const trimmed = payload.trim();
-  if (trimmed === "[DONE]") return true;
+  if (trimmed === "[DONE]") return false;
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);

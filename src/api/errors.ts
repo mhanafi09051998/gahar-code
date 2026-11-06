@@ -1,4 +1,4 @@
-import { GaharError } from "../shared/errors.js";
+import { describeApiError, GaharError } from "../shared/errors.js";
 
 export interface HeaderReader {
   get(name: string): string | null;
@@ -61,13 +61,20 @@ export function abortError(): GaharError {
 
 /** Build a GaharError from a provider error body (JSON or plain text). */
 export function apiErrorFromBody(status: number, body: string): GaharError {
-  return statusError(status, extractMessage(body));
+  return describeApiError(status, extractMessage(body));
 }
 
 /** Build a GaharError when the provider reported an error object mid-stream. */
-export function apiErrorFromPayload(payload: unknown, status = 0): GaharError {
+export function apiErrorFromPayload(payload: unknown): GaharError {
   const message = payloadMessage(payload) ?? "provider reported an error";
-  return statusError(status, message);
+  return describeApiError(payloadStatus(payload), message);
+}
+
+/** Numeric status carried by a mid-stream error object ({ code: 502 }), else 0. */
+export function payloadStatus(payload: unknown): number {
+  if (!payload || typeof payload !== "object") return 0;
+  const code = (payload as Record<string, unknown>).code;
+  return typeof code === "number" && Number.isInteger(code) ? code : 0;
 }
 
 function payloadMessage(payload: unknown): string | null {
@@ -81,41 +88,6 @@ function payloadMessage(payload: unknown): string | null {
     if (typeof nested === "string" && nested.length > 0) return nested;
   }
   return null;
-}
-
-function statusError(status: number, message: string): GaharError {
-  if (status === 401) {
-    return new GaharError(`OpenRouter rejected the API key (401): ${message}`, {
-      code: "unauthorized",
-      exitCode: 3,
-    });
-  }
-  if (status === 402) {
-    return new GaharError(`OpenRouter reports insufficient credits (402): ${message}`, {
-      code: "insufficient_credits",
-    });
-  }
-  if (status === 403) {
-    return new GaharError(`OpenRouter refused the request (403): ${message}`, {
-      code: "forbidden",
-    });
-  }
-  if (status === 404) {
-    return new GaharError(`Model or endpoint not found (404): ${message}`, {
-      code: "not_found",
-    });
-  }
-  if (status === 429) {
-    return new GaharError(`OpenRouter rate limit reached (429): ${message}`, {
-      code: "rate_limited",
-    });
-  }
-  if (status >= 500) {
-    return new GaharError(`OpenRouter/provider error (${status}): ${message}`, {
-      code: "provider_error",
-    });
-  }
-  return new GaharError(`OpenRouter error (${status}): ${message}`, { code: "api_error" });
 }
 
 /** Extract a human readable message from a provider body (JSON or plain text). */

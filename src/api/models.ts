@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { KeyInfo, ModelInfo } from "../contracts/messages.js";
-import { ensureDir, readTextFileIfExists } from "../shared/fsx.js";
+import { atomicWriteFile, readTextFileIfExists } from "../shared/fsx.js";
 
 export const MODEL_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -54,7 +54,10 @@ export function mapModelInfos(payload: unknown): ModelInfo[] {
   return models;
 }
 
-export async function readModelCache(configDir: string, ttlMs = MODEL_CACHE_TTL_MS): Promise<ModelInfo[] | null> {
+export async function readModelCache(
+  configDir: string,
+  ttlMs = MODEL_CACHE_TTL_MS,
+): Promise<ModelInfo[] | null> {
   const raw = await readTextFileIfExists(modelsCachePath(configDir));
   if (raw === null) return null;
   try {
@@ -76,17 +79,11 @@ export async function writeModelCache(
   fetchedAt = Date.now(),
 ): Promise<void> {
   try {
-    await ensureDir(join(configDir, "cache"));
     const payload: ModelCache = { fetchedAt, models };
-    await writeFileSafe(modelsCachePath(configDir), JSON.stringify(payload, null, 2));
+    await atomicWriteFile(modelsCachePath(configDir), JSON.stringify(payload, null, 2));
   } catch {
     // cache is best effort
   }
-}
-
-async function writeFileSafe(filePath: string, content: string): Promise<void> {
-  const { writeFile } = await import("node:fs/promises");
-  await writeFile(filePath, content, "utf8");
 }
 
 /** Maps the /key response (with or without a data wrapper) to KeyInfo. */

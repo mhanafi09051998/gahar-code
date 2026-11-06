@@ -1,4 +1,5 @@
 import type { ChatClient, ChatMessage, ModelInfo } from "../contracts/messages.js";
+import { toErrorMessage } from "../shared/errors.js";
 import { approxTokens } from "../shared/truncate.js";
 
 export const COMPACTION_THRESHOLD = 0.8;
@@ -58,9 +59,10 @@ export async function compact(
   };
   const system = messages.filter((message) => message.role === "system");
   const rest = messages.filter((message) => message.role !== "system");
-  if (rest.length <= keepRecent + 1) return unchanged;
-  const older = rest.slice(0, rest.length - keepRecent);
-  const recent = rest.slice(rest.length - keepRecent);
+  const split = recentStart(rest, keepRecent);
+  if (split <= 1) return unchanged;
+  const older = rest.slice(0, split);
+  const recent = rest.slice(split);
   try {
     const result = await client.streamChat(
       {
@@ -88,8 +90,15 @@ export async function compact(
       messagesAfter: next.length,
     };
   } catch (error) {
-    return { ...unchanged, error: error instanceof Error ? error.message : String(error) };
+    return { ...unchanged, error: toErrorMessage(error) };
   }
+}
+
+/** Index where the kept tail begins, moved back so it never starts with orphaned tool results. */
+function recentStart(messages: ChatMessage[], keepRecent: number): number {
+  let start = Math.max(0, messages.length - keepRecent);
+  while (start > 0 && messages[start]?.role === "tool") start -= 1;
+  return start;
 }
 
 export function renderTranscript(messages: ChatMessage[]): string {

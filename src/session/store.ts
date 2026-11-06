@@ -1,10 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, readdir, readFile } from "node:fs/promises";
+import { appendFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ChatMessage, ToolCall, Usage } from "../contracts/messages.js";
 import type { SessionMeta, SessionSummary } from "../contracts/session.js";
-import { ensureDir, isErrno, pathExists, readTextFileIfExists, removePath } from "../shared/fsx.js";
-import { atomicWriteFile } from "../shared/fsx.js";
+import {
+  atomicWriteFile,
+  ensureDir,
+  isErrno,
+  pathExists,
+  readTextFileIfExists,
+  removePath,
+} from "../shared/fsx.js";
 import {
   projectSessionsDir,
   sessionEventsPath,
@@ -30,13 +36,6 @@ export interface SessionStoreOptions {
   id?: string;
   model: string;
   now?: () => Date;
-}
-
-export interface LoadedSession {
-  meta: SessionMeta;
-  messages: ChatMessage[];
-  usage: Usage;
-  repaired: boolean;
 }
 
 export class SessionStore {
@@ -207,12 +206,12 @@ export function repairDanglingToolCalls(messages: ChatMessage[]): boolean {
   let repaired = false;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
-    if (!message || message.role !== "assistant" || !message.tool_calls?.length) continue;
+    if (message?.role !== "assistant" || !message.tool_calls?.length) continue;
     const answered = new Set<string>();
     let j = i + 1;
     for (; j < messages.length; j++) {
       const next = messages[j];
-      if (!next || next.role !== "tool") break;
+      if (next?.role !== "tool") break;
       if (next.tool_call_id) answered.add(next.tool_call_id);
     }
     const missing = message.tool_calls.filter((call: ToolCall) => !answered.has(call.id));
@@ -249,9 +248,7 @@ export async function listSessions(configDir: string, cwd: string): Promise<Sess
       if (!meta || typeof meta.id !== "string") continue;
       const parsed = await readSessionEvents(sessionEventsPath(sessionDirPath));
       summaries.push({ ...meta, path: sessionDirPath, usage: parsed.usage });
-    } catch {
-      continue;
-    }
+    } catch {}
   }
   summaries.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
   return summaries;
@@ -266,10 +263,6 @@ export async function sessionExists(configDir: string, cwd: string, id: string):
   return pathExists(sessionMetaPath(sessionPath(configDir, cwd, id)));
 }
 
-export async function readSessionFile(filePath: string): Promise<string | null> {
-  try {
-    return await readFile(filePath, "utf8");
-  } catch {
-    return null;
-  }
+export async function removeSession(configDir: string, cwd: string, id: string): Promise<void> {
+  await removePath(sessionPath(configDir, cwd, id));
 }

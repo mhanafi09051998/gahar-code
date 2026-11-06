@@ -103,7 +103,10 @@ export async function loadInstructions(
 }
 
 /** Renders instruction files into a capped block for the system prompt. */
-export function renderInstructions(files: InstructionFile[], maxTotal = MAX_TOTAL_INSTRUCTIONS_CHARS): string {
+export function renderInstructions(
+  files: InstructionFile[],
+  maxTotal = MAX_TOTAL_INSTRUCTIONS_CHARS,
+): string {
   if (files.length === 0) return "";
   const blocks: string[] = [];
   let used = 0;

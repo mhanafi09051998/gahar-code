@@ -4,38 +4,37 @@ import type {
   ChatResult,
   KeyInfo,
   ModelInfo,
+  StreamHandlers,
   Usage,
 } from "../contracts/messages.js";
 import { DEFAULT_BASE_URL, HTTP_REFERER, X_TITLE } from "../shared/defaults.js";
-import { GaharError } from "../shared/errors.js";
+import { GaharError, isAbortError } from "../shared/errors.js";
+import { abortError, computeBackoffMs, MAX_ATTEMPTS, sleep } from "./errors.js";
 import {
-  MAX_ATTEMPTS,
-  apiErrorFromPayload,
-  computeBackoffMs,
-  extractMessage,
-  isRetryableStatus,
-  sleep,
-} from "./errors.js";
-import {
-  HttpStatusError,
-  NetworkError,
-  abortError,
   httpError,
-  isAbort,
   isRetryable,
   networkError,
   retryAfterOf,
+  streamPayloadError,
   toError,
 } from "./http.js";
-import { filterModels, mapKeyInfo, mapModelInfos, readModelCache, writeModelCache } from "./models.js";
-import { applySsePayload, readSseStream, type StreamAccumulator } from "./sse.js";
+import {
+  filterModels,
+  mapKeyInfo,
+  mapModelInfos,
+  readModelCache,
+  writeModelCache,
+} from "./models.js";
+import { applySsePayload, newAccumulator, readSseStream, type StreamAccumulator } from "./sse.js";
+
+export type ReasoningOptions = NonNullable<ChatRequest["reasoning"]>;
 
 export interface OpenRouterClientOptions {
   apiKey: string;
   baseUrl?: string;
   configDir?: string;
   fetchImpl?: typeof fetch;
-  reasoning?: { effort?: string; max_tokens?: number; exclude?: boolean };
+  reasoning?: ReasoningOptions;
   maxRetries?: number;
   retryDelayMs?: number;
   cacheTtlMs?: number;
@@ -45,12 +44,17 @@ export interface OpenRouterClientOptions {
 
 const KEY_CACHE_TTL_MS = 5 * 60 * 1000;
 
+interface TimedSignal {
+  signal?: AbortSignal;
+  done: () => void;
+}
+
 export class OpenRouterClient implements ChatClient {
   private readonly baseUrl: string;
   private readonly configDir: string | undefined;
   private readonly doFetch: typeof fetch;
   private readonly apiKey: string;
-  private readonly reasoning: OpenRouterClientOptions["reasoning"];
+  private readonly reasoning: ReasoningOptions | undefined;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number | undefined;
   private readonly cacheTtlMs: number | undefined;
@@ -81,15 +85,16 @@ export class OpenRouterClient implements ChatClient {
     };
   }
 
-  private timeoutSignal(signal?: AbortSignal): { signal?: AbortSignal; done: () => void } {
+  /** Combines the caller signal with an optional request timeout. */
+  private timeoutSignal(signal?: AbortSignal): TimedSignal {
     if (this.timeoutMs === undefined || this.timeoutMs <= 0) return { signal, done: () => {} };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     const onAbort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
     signal?.addEventListener("abort", onAbort, { once: true });
-    const combined = signal ? controller.signal : controller.signal;
     return {
-      signal: combined,
+      signal: controller.signal,
       done: () => {
         clearTimeout(timer);
         signal?.removeEventListener("abort", onAbort);
@@ -97,17 +102,29 @@ export class OpenRouterClient implements ChatClient {
     };
   }
 
-  async streamChat(request: ChatRequest, handlers: import("../contracts/messages.js").StreamHandlers): Promise<ChatResult> {
+  /** Streams a completion, retrying transient failures only before any output was emitted. */
+  async streamChat(request: ChatRequest, handlers: StreamHandlers): Promise<ChatResult> {
     const attempts = Math.max(1, this.maxRetries);
+    let emitted = false;
+    const tracked: StreamHandlers = {
+      ...handlers,
+      onText: (text) => {
+        emitted = true;
+        handlers.onText?.(text);
+      },
+      onReasoning: (text) => {
+        emitted = true;
+        handlers.onReasoning?.(text);
+      },
+    };
     let lastError: unknown;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        return await this.streamOnce(request, handlers);
+        return await this.streamOnce(request, tracked);
       } catch (error) {
-        if (isAbort(error) || request.signal?.aborted) throw abortError();
+        if (isAbortError(error) || request.signal?.aborted) throw abortError();
         lastError = error;
-        const retryable = isRetryable(error) && attempt < attempts;
-        if (!retryable) throw error;
+        if (emitted || !isRetryable(error) || attempt >= attempts) throw toError(error);
         const delay = this.retryDelayMs ?? computeBackoffMs(attempt, retryAfterOf(error));
         await this.sleepImpl(delay, request.signal);
       }
@@ -115,10 +132,7 @@ export class OpenRouterClient implements ChatClient {
     throw toError(lastError);
   }
 
-  private async streamOnce(
-    request: ChatRequest,
-    handlers: import("../contracts/messages.js").StreamHandlers,
-  ): Promise<ChatResult> {
+  private requestBody(request: ChatRequest): Record<string, unknown> {
     const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages,
@@ -133,99 +147,75 @@ export class OpenRouterClient implements ChatClient {
     if (request.temperature !== undefined) body.temperature = request.temperature;
     const reasoning = request.reasoning ?? this.reasoning;
     if (reasoning) body.reasoning = reasoning;
+    return body;
+  }
+
+  private async streamOnce(request: ChatRequest, handlers: StreamHandlers): Promise<ChatResult> {
     const timed = this.timeoutSignal(request.signal);
-    let response: Response;
     try {
-      response = await this.doFetch(`${this.baseUrl}/chat/completions`, {
+      const response = await this.fetchOrThrow(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: this.headers(),
-        body: JSON.stringify(body),
+        body: JSON.stringify(this.requestBody(request)),
         signal: timed.signal,
       });
-    } catch (error) {
+      if (!response.body) {
+        throw new GaharError("OpenRouter returned an empty response body", {
+          code: "empty_response",
+        });
+      }
+      const acc = await this.consumeStream(response.body, timed.signal, handlers);
+      return finishResult(acc, handlers);
+    } finally {
       timed.done();
-      if (request.signal?.aborted) throw abortError();
+    }
+  }
+
+  private async consumeStream(
+    body: ReadableStream<Uint8Array>,
+    signal: AbortSignal | undefined,
+    handlers: StreamHandlers,
+  ): Promise<StreamAccumulator> {
+    const acc = newAccumulator();
+    let sentContent = 0;
+    let sentReasoning = 0;
+    try {
+      for await (const payload of readSseStream(body, signal)) {
+        applySsePayload(acc, payload);
+        if (acc.error !== undefined) throw streamPayloadError(acc.error);
+        if (acc.content.length > sentContent) {
+          handlers.onText?.(acc.content.slice(sentContent));
+          sentContent = acc.content.length;
+        }
+        if (acc.reasoning.length > sentReasoning) {
+          handlers.onReasoning?.(acc.reasoning.slice(sentReasoning));
+          sentReasoning = acc.reasoning.length;
+        }
+      }
+    } catch (error) {
+      if (isAbortError(error) || signal?.aborted) throw abortError();
+      if (error instanceof GaharError) throw error;
+      throw networkError(error);
+    }
+    return acc;
+  }
+
+  private async fetchOrThrow(url: string, init: RequestInit): Promise<Response> {
+    let response: Response;
+    try {
+      response = await this.doFetch(url, init);
+    } catch (error) {
+      if (init.signal?.aborted) throw abortError();
       throw networkError(error);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      timed.done();
       throw httpError(response.status, text, response);
     }
-    if (!response.body) {
-      timed.done();
-      throw new GaharError("OpenRouter returned an empty response body", {
-        code: "empty_response",
-      });
-    }
-    const acc: StreamAccumulator = {
-      content: "",
-      reasoning: "",
-      toolCalls: [],
-      finishReason: null,
-      usage: undefined,
-      model: undefined,
-      generationId: undefined,
-      error: undefined,
-    };
-    try {
-      for await (const payload of readSseStream(response.body, request.signal)) {
-        const wasDone = payload.trim() === "[DONE]";
-        applySsePayload(acc, payload);
-        this.emitDeltas(acc, handlers, wasDone);
-        if (acc.error !== undefined && acc.error !== null) {
-          throw apiErrorFromPayload(acc.error);
-        }
-      }
-    } catch (error) {
-      timed.done();
-      if (isAbort(error)) throw abortError();
-      throw error;
-    }
-    timed.done();
-    if (acc.error !== undefined && acc.error !== null) throw apiErrorFromPayload(acc.error);
-    const usage = acc.usage ? (acc.usage as Usage) : undefined;
-    if (usage) handlers.onUsage?.(usage);
-    handlers.onFinish?.(acc.finishReason);
-    return {
-      message: {
-        role: "assistant",
-        content: acc.content.length > 0 ? acc.content : null,
-        ...(acc.toolCalls.length > 0 ? { tool_calls: acc.toolCalls } : {}),
-        ...(acc.reasoning.length > 0 ? { reasoning: acc.reasoning } : {}),
-      },
-      finishReason: acc.finishReason,
-      ...(usage ? { usage } : {}),
-      ...(acc.model ? { model: acc.model } : {}),
-      ...(acc.generationId ? { generationId: acc.generationId } : {}),
-    };
+    return response;
   }
 
-  private emitDeltas(
-    acc: StreamAccumulator,
-    handlers: import("../contracts/messages.js").StreamHandlers,
-    isDone: boolean,
-  ): void {
-    const contentLen = this.emittedContent;
-    if (acc.content.length > contentLen) {
-      handlers.onText?.(acc.content.slice(contentLen));
-      this.emittedContent = acc.content.length;
-    }
-    const reasoningLen = this.emittedReasoning;
-    if (acc.reasoning.length > reasoningLen) {
-      handlers.onReasoning?.(acc.reasoning.slice(reasoningLen));
-      this.emittedReasoning = acc.reasoning.length;
-    }
-    if (isDone) {
-      this.emittedContent = 0;
-      this.emittedReasoning = 0;
-    }
-  }
-
-  private emittedContent = 0;
-  private emittedReasoning = 0;
-
-  async listModels(options: { force?: boolean } = {}): Promise<ModelInfo[]> {
+  async listModels(options: { force?: boolean; signal?: AbortSignal } = {}): Promise<ModelInfo[]> {
     const force = options.force === true;
     if (!force && this.modelsMemo) return this.modelsMemo;
     if (!force && this.configDir) {
@@ -235,44 +225,43 @@ export class OpenRouterClient implements ChatClient {
         return cached;
       }
     }
-    const payload = await this.requestJson("GET", "/models");
+    const payload = await this.requestJson("/models", { signal: options.signal });
     const models = filterModels(mapModelInfos(payload));
     this.modelsMemo = models;
     if (this.configDir) await writeModelCache(this.configDir, models);
     return models;
   }
 
-  async validateKey(key?: string): Promise<KeyInfo> {
+  async validateKey(key?: string, signal?: AbortSignal): Promise<KeyInfo> {
     if (!key && this.keyMemo && Date.now() - this.keyMemo.at < KEY_CACHE_TTL_MS) {
       return this.keyMemo.info;
     }
-    const payload = await this.requestJson("GET", "/key", { key });
+    const payload = await this.requestJson("/key", { key, signal });
     const info = mapKeyInfo(payload);
     if (!key) this.keyMemo = { at: Date.now(), info };
     return info;
   }
 
   private async requestJson(
-    method: string,
     path: string,
-    options: { key?: string; body?: unknown } = {},
+    options: { key?: string | undefined; signal?: AbortSignal | undefined } = {},
   ): Promise<unknown> {
-    const timed = this.timeoutSignal(undefined);
-    let response: Response;
+    const timed = this.timeoutSignal(options.signal);
+    let text: string;
     try {
-      response = await this.doFetch(`${this.baseUrl}${path}`, {
-        method,
+      const response = await this.fetchOrThrow(`${this.baseUrl}${path}`, {
+        method: "GET",
         headers: this.headers(options.key),
         signal: timed.signal,
-        ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
       });
+      text = await response.text();
     } catch (error) {
-      timed.done();
+      if (isAbortError(error) || options.signal?.aborted) throw abortError();
+      if (error instanceof GaharError) throw error;
       throw networkError(error);
+    } finally {
+      timed.done();
     }
-    const text = await response.text().catch(() => "");
-    timed.done();
-    if (!response.ok) throw httpError(response.status, text, response);
     if (text.trim().length === 0) return {};
     try {
       return JSON.parse(text);
@@ -282,4 +271,22 @@ export class OpenRouterClient implements ChatClient {
       });
     }
   }
+}
+
+function finishResult(acc: StreamAccumulator, handlers: StreamHandlers): ChatResult {
+  const usage = acc.usage as Usage | undefined;
+  if (usage) handlers.onUsage?.(usage);
+  handlers.onFinish?.(acc.finishReason);
+  return {
+    message: {
+      role: "assistant",
+      content: acc.content.length > 0 ? acc.content : null,
+      ...(acc.toolCalls.length > 0 ? { tool_calls: acc.toolCalls.filter(Boolean) } : {}),
+      ...(acc.reasoning.length > 0 ? { reasoning: acc.reasoning } : {}),
+    },
+    finishReason: acc.finishReason,
+    ...(usage ? { usage } : {}),
+    ...(acc.model ? { model: acc.model } : {}),
+    ...(acc.generationId ? { generationId: acc.generationId } : {}),
+  };
 }

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
 import { realpath } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, join, resolve } from "node:path";
 
 /** Global config directory: GAHAR_CONFIG_DIR, else ~/.gahar. */
 export function defaultConfigDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -62,12 +62,6 @@ export function sessionDir(configDir: string, absPath: string, sessionId: string
 
 export function projectConfigPath(absPath: string): string {
   return join(absPath, ".gahar", "config.json");
-}
-
-export function resolveCwdWithin(rel: string, cwd: string): string {
-  const abs = resolve(cwd, rel);
-  const normalizedCwd = cwd.endsWith(sep) ? cwd : cwd + sep;
-  return abs.startsWith(normalizedCwd) || abs === cwd ? abs : abs;
 }
 
 /** Resolves a path through realpath, falling back to the resolved path. */

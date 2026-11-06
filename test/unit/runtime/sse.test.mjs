@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SseParser, applySsePayload, readSseStream } from "../../../dist/api/sse.js";
+import { applySsePayload, readSseStream, SseParser } from "../../../dist/api/sse.js";
 
 function newAcc() {
   return {
@@ -38,7 +38,10 @@ test("parses a simple data event", () => {
 test("handles CRLF line endings", () => {
   const parser = new SseParser();
   const events = parser.push('data: {"a":1}\r\n\r\ndata: {"b":2}\r\n\r\n');
-  assert.deepEqual(events.map((e) => e.data), ['{"a":1}', '{"b":2}']);
+  assert.deepEqual(
+    events.map((e) => e.data),
+    ['{"a":1}', '{"b":2}'],
+  );
 });
 
 test("ignores comment lines and joins multi-line data", () => {
@@ -51,7 +54,7 @@ test("ignores comment lines and joins multi-line data", () => {
 test("survives chunk boundaries splitting any line", () => {
   const parser = new SseParser();
   const out = [];
-  for (const part of ["da", "ta: {\"x\"", ":1}\n", "\n"]) out.push(...parser.push(part));
+  for (const part of ["da", 'ta: {"x"', ":1}\n", "\n"]) out.push(...parser.push(part));
   assert.equal(out.length, 1);
   assert.equal(out[0].data, '{"x":1}');
 });
@@ -75,7 +78,9 @@ test("accumulates reasoning and reasoning_details", () => {
   applySsePayload(acc, JSON.stringify({ choices: [{ delta: { reasoning: "think " } }] }));
   applySsePayload(
     acc,
-    JSON.stringify({ choices: [{ delta: { reasoning_details: [{ type: "text", text: "more" }] } }] }),
+    JSON.stringify({
+      choices: [{ delta: { reasoning_details: [{ type: "text", text: "more" }] } }],
+    }),
   );
   assert.equal(acc.reasoning, "think more");
 });
@@ -123,7 +128,13 @@ test("captures usage-only final chunk and finish reason", () => {
     acc,
     JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { total_tokens: 5 } }),
   );
-  applySsePayload(acc, JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } }));
+  applySsePayload(
+    acc,
+    JSON.stringify({
+      choices: [],
+      usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 },
+    }),
+  );
   assert.equal(acc.finishReason, "stop");
   assert.equal(acc.usage.total_tokens, 5);
 });

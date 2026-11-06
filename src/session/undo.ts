@@ -1,20 +1,25 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { copyFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { ensureDir, isErrno, pathExists, readTextFileIfExists, removePath } from "../shared/fsx.js";
-import { atomicWriteFile } from "../shared/fsx.js";
+import type { SnapshotStore } from "../contracts/tools.js";
+import {
+  atomicWriteFile,
+  ensureDir,
+  isErrno,
+  pathExists,
+  readTextFileIfExists,
+  removePath,
+} from "../shared/fsx.js";
 
 export const MAX_UNDO_TURNS = 20;
 
 export interface SnapshotEntry {
   /** Absolute path of the captured file. */
   abs: string;
-  /** Path relative to the snapshot turn directory. */
+  /** Path of the copy, relative to the snapshot turn directory. */
   stored: string;
   /** Whether the file existed before the capture. */
   existed: boolean;
-  /** Whether the original was binary (stored as a copy, not text). */
-  binary: boolean;
 }
 
 export interface TurnIndex {
@@ -30,8 +35,8 @@ export interface UndoOptions {
   now?: () => Date;
 }
 
-/** Captures file contents per turn so a turn can be reverted. */
-export class UndoManager {
+/** Captures file contents per turn so a whole turn can be reverted. */
+export class UndoManager implements SnapshotStore {
   private readonly snapshotsDir: string;
   private readonly cwd: string;
   private readonly maxTurns: number;
@@ -49,9 +54,11 @@ export class UndoManager {
     return this.currentTurn;
   }
 
-  /** Starts a new turn; returns its index. */
-  beginTurn(): number {
-    this.currentTurn += 1;
+  /** Starts a new turn after any turn already on disk (safe across resumes) and prunes old ones. */
+  async beginTurn(): Promise<number> {
+    const latest = (await this.listTurns())[0] ?? 0;
+    this.currentTurn = Math.max(this.currentTurn, latest) + 1;
+    await this.prune(this.maxTurns - 1);
     return this.currentTurn;
   }
 
@@ -63,43 +70,42 @@ export class UndoManager {
     return join(this.turnDir(turn), "index.json");
   }
 
-  /** Copies the file into snapshots/<turn>/ before it is modified. */
-  async capture(absPath: string, turn = this.currentTurn): Promise<void> {
+  /** Copies the file into snapshots/<turn>/files/ before its first change in the turn. */
+  async capture(absPath: string): Promise<void> {
+    if (this.currentTurn === 0) await this.beginTurn();
+    const turn = this.currentTurn;
     const abs = resolve(absPath);
     const index = await this.readIndex(turn);
     if (index.entries.some((entry) => entry.abs === abs)) return;
     const stored = this.storedName(abs);
-    const dir = this.turnDir(turn);
-    await ensureDir(dir);
     const existed = await pathExists(abs);
-    let binary = false;
     if (existed) {
-      const buffer = await readFile(abs);
-      binary = buffer.includes(0);
-      await atomicWriteFile(join(dir, stored), buffer.toString("base64"));
+      const target = join(this.turnDir(turn), stored);
+      await ensureDir(dirname(target));
+      await copyFile(abs, target);
     }
-    index.entries.push({ abs, stored, existed, binary });
-    index.createdAt = this.now().toISOString();
+    index.entries.push({ abs, stored, existed });
     await atomicWriteFile(this.indexPath(turn), `${JSON.stringify(index, null, 2)}\n`);
   }
 
   private storedName(abs: string): string {
     const rel = relative(this.cwd, abs);
     if (rel.length > 0 && !rel.startsWith("..") && !isAbsolute(rel)) {
-      return rel.split(sep).join("/");
+      return `files/${rel.split(sep).join("/")}`;
     }
-    return `_external/${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
+    return `external/${createHash("sha256").update(abs).digest("hex").slice(0, 16)}`;
   }
 
   private async readIndex(turn: number): Promise<TurnIndex> {
+    const empty: TurnIndex = { turn, createdAt: this.now().toISOString(), entries: [] };
     const raw = await readTextFileIfExists(this.indexPath(turn));
-    if (raw === null) return { turn, createdAt: this.now().toISOString(), entries: [] };
+    if (raw === null) return empty;
     try {
-      const parsed = JSON.parse(raw) as TurnIndex;
-      if (!parsed || !Array.isArray(parsed.entries)) throw new Error("bad index");
-      return { turn, createdAt: parsed.createdAt ?? "", entries: parsed.entries };
+      const parsed = JSON.parse(raw) as Partial<TurnIndex>;
+      if (!Array.isArray(parsed.entries)) return empty;
+      return { turn, createdAt: parsed.createdAt ?? empty.createdAt, entries: parsed.entries };
     } catch {
-      return { turn, createdAt: this.now().toISOString(), entries: [] };
+      return empty;
     }
   }
 
@@ -118,22 +124,20 @@ export class UndoManager {
       .sort((a, b) => b - a);
   }
 
-  /** Restores every file captured in a turn; returns the restored paths. */
+  /** Restores every file captured in a turn (deleting files it created); returns their paths. */
   async restoreTurn(turn: number): Promise<string[]> {
     const index = await this.readIndex(turn);
     const restored: string[] = [];
     for (const entry of index.entries) {
-      const storedPath = join(this.turnDir(turn), entry.stored);
       if (!entry.existed) {
         await removePath(entry.abs);
         restored.push(entry.abs);
         continue;
       }
-      const encoded = await readTextFileIfExists(storedPath);
-      if (encoded === null) continue;
-      const buffer = Buffer.from(encoded, "base64");
+      const storedPath = join(this.turnDir(turn), entry.stored);
+      if (!(await pathExists(storedPath))) continue;
       await ensureDir(dirname(entry.abs));
-      await atomicWriteFile(entry.abs, buffer.toString("utf8"));
+      await copyFile(storedPath, entry.abs);
       restored.push(entry.abs);
     }
     await removePath(this.turnDir(turn));
@@ -142,31 +146,21 @@ export class UndoManager {
 
   /** Restores the most recent turn that still has snapshots. */
   async undoLast(): Promise<{ turn: number; restored: string[] } | null> {
-    const turns = await this.listTurns();
-    const turn = turns[0];
+    const turn = (await this.listTurns())[0];
     if (turn === undefined) return null;
     const restored = await this.restoreTurn(turn);
     return { turn, restored };
   }
 
-  /** Drops the oldest turns beyond maxTurns. */
-  async prune(): Promise<void> {
+  /** Keeps only the newest `keep` turns on disk. */
+  async prune(keep = this.maxTurns): Promise<void> {
     const turns = await this.listTurns();
-    for (const turn of turns.slice(this.maxTurns)) {
+    for (const turn of turns.slice(Math.max(0, keep))) {
       await removePath(this.turnDir(turn));
     }
   }
 
   async hasSnapshots(): Promise<boolean> {
-    const turns = await this.listTurns();
-    return turns.length > 0;
-  }
-
-  async fileSizeOf(absPath: string): Promise<number> {
-    try {
-      return (await stat(absPath)).size;
-    } catch {
-      return 0;
-    }
+    return (await this.listTurns()).length > 0;
   }
 }
